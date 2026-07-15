@@ -4,6 +4,7 @@ if (new URLSearchParams(location.search).has("embedded")) document.body.classLis
 let sourceTabId = Number(new URLSearchParams(location.search).get("tabId")) || null;
 let dead = false;
 let autoTriggered = false;
+let collectListening = false;
 
 interface AgentContextSnapshot {
   snapshot: PageSnapshot;
@@ -426,27 +427,28 @@ $("diagDom").addEventListener("click", async () => {
 $("collectOptions").addEventListener("click", async () => {
   const out = $("diagOutput");
   out.hidden = false;
-  out.textContent = "正在自动 hover 每个筛选并采集选项（请勿操作 BOSS 页面）…";
   const tab = await sourceTab();
   if (!tab?.id) { out.textContent = "未找到 BOSS 标签页"; return; }
-  const r = await tabsMessage<{ ok?: boolean; dims?: string[]; options?: Record<string, Array<{ text: string; selected: boolean }>>; error?: string }>(tab.id, { type: "COLLECT_FILTER_OPTIONS" });
-  if (!r?.ok) {
-    const d = r as { error?: string; firstChip?: string; chipTexts?: string[]; nearby?: Array<{ tag?: string; cls?: string; text?: string; visible?: boolean }>; grandNearby?: Array<{ tag?: string; text?: string; visible?: boolean }> };
-    const lines: string[] = [`采集失败：${d.error || "content script 未响应（重载扩展+刷新 BOSS 页）"}`];
-    if (d.firstChip) lines.push(`首个 chip：${esc(d.firstChip)}`);
-    if (d.chipTexts?.length) lines.push(`找到的 chip（${d.chipTexts.length}）：${d.chipTexts.map(esc).join(" / ")}`);
-    if (d.nearby?.length) { lines.push("", "chip 父容器内元素样本："); for (const x of d.nearby) lines.push(`  <${x.tag} class="${esc(x.cls || "")}">${esc(x.text || "")} ${x.visible ? "（可见）" : "（隐藏）"}`); }
-    if (d.grandNearby?.length) { lines.push("", "chip 祖父容器内元素样本："); for (const x of d.grandNearby) lines.push(`  <${x.tag}>${esc(x.text || "")} ${x.visible ? "（可见）" : "（隐藏）"}`); }
+  if (!collectListening) {
+    const r = await tabsMessage<{ ok?: boolean }>(tab.id, { type: "COLLECT_OPTIONS_LISTEN", action: "start" });
+    if (!r?.ok) { out.textContent = "启动监听失败（重载扩展+刷新 BOSS 页）"; return; }
+    collectListening = true;
+    document.getElementById("collectOptions")!.textContent = "■ 结束监听";
+    out.innerHTML = "监听中…请在 BOSS 页面依次 <b>hover 打开每个筛选下拉</b>（薪资/经验/学历/求职类型/行业/规模，每个停 1 秒）。<br>全部打开后回来点「结束监听」。";
+  } else {
+    const r = await tabsMessage<{ ok?: boolean; batches?: string[][] }>(tab.id, { type: "COLLECT_OPTIONS_LISTEN", action: "stop" });
+    collectListening = false;
+    document.getElementById("collectOptions")!.textContent = "采集筛选选项";
+    if (!r?.ok) { out.textContent = "结束失败"; return; }
+    const batches = r.batches || [];
+    if (!batches.length) { out.innerHTML = "未抓到任何选项。请确认：监听期间确实 hover 打开了下拉（面板展开了），且选项是 li/[role=option] 结构。"; return; }
+    const lines: string[] = [`抓到 ${batches.length} 批选项（请贴回给我，我会映射到各维度）：`];
+    batches.forEach((b, i) => {
+      lines.push("", `【批次 ${i + 1}】（${b.length} 个）：`);
+      for (const x of b) lines.push("  " + esc(x));
+    });
     out.innerHTML = lines.join("\n");
-    return;
   }
-  const lines: string[] = [`已采集 ${r.dims?.length || 0} 个维度的选项（已存入 storage.filterOptions）`];
-  const dimName: Record<string, string> = { salary: "薪资", jobTypes: "求职类型", experience: "经验", education: "学历", industries: "行业", companySizes: "规模", location: "城市" };
-  for (const [dim, opts] of Object.entries(r.options || {})) {
-    lines.push("", `${dimName[dim] || dim}（${opts.length}）：`);
-    for (const o of opts) lines.push(`  ${o.selected ? "☑" : "☐"} ${esc(o.text)}`);
-  }
-  out.innerHTML = lines.join("\n");
 });
 
 for (const [id, kind] of [["approveAction", "approve"], ["rejectAction", "reject"]] as const) {

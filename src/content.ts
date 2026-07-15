@@ -6,6 +6,8 @@ import { buildAgentIntent } from "./agent/intent";
 import type { AgentActionResult, AgentDecision, AgentTools, Job, RuntimeAction, Settings } from "./types";
 
 let contextDead = false;
+let listenTimer: ReturnType<typeof setInterval> | null = null;
+let listenBatches: string[][] = [];
 
 async function runtimeMessage<T = any>(message: unknown): Promise<T | null> {
   if (contextDead) return null;
@@ -297,67 +299,34 @@ chrome.runtime.onMessage.addListener((message: any, _sender, sendResponse) => {
     }
     return true;
   }
-  if (message.type === "COLLECT_FILTER_OPTIONS") {
-    // 先诊断 click / hover 哪个能触发下拉面板，再用生效方式全量采集；
-    // 都不生效则返回附近隐藏选项样本（BOSS 可能用纯 CSS :hover，程序化事件触发不了）。
-    (async () => {
-      try {
-        const snap = snapshotPage();
-        const chips = snap.elements
-          .map(e => ({ el: resolveRef(e.id), dim: classifyChip(e.text), text: e.text }))
-          .filter(c => c.el && c.dim) as Array<{ el: HTMLElement; dim: string; text: string }>;
-        if (!chips.length) {
-          sendResponse({ ok: false, error: "未找到筛选 chip（snapshotPage 未抓到 region=filter 且文本匹配维度的元素）", filterTexts: snap.elements.filter(e => e.region === "filter").map(e => e.text) });
-          return;
-        }
-        const OPT = "[role='option'], [role='menuitemcheckbox'], [class*='filter-option'], [class*='dropdown-item'], [class*='select-item'], li[aria-selected], [class*='multiple'] li";
-        const grabVisible = () => [...document.querySelectorAll<HTMLElement>(OPT)]
+  if (message.type === "COLLECT_OPTIONS_LISTEN") {
+    // 监听模式：用户在 BOSS 页面手动 hover 打开各筛选下拉，
+    // content script 每 400ms 抓取当前可见的选项，按"选项文本集合"去重记为一批。
+    if (message.action === "start") {
+      if (listenTimer) clearInterval(listenTimer);
+      listenBatches = [];
+      const OPT = "[role='option'], [role='menuitemcheckbox'], [class*='filter-option'], [class*='dropdown-item'], [class*='select-item'], li[aria-selected], [class*='multiple'] li";
+      listenTimer = setInterval(() => {
+        const opts = [...document.querySelectorAll<HTMLElement>(OPT)]
           .filter(el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
-          .map(el => ({ text: (el.innerText || el.textContent || "").trim(), selected: el.getAttribute("aria-selected") === "true" || el.classList.contains("selected") || el.classList.contains("active") }))
-          .filter(o => o.text);
-        const fireHover = (el: HTMLElement, enter: boolean) => {
-          const f = (t: string) => el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
-          if (enter) { f("mouseenter"); f("mouseover"); f("mousemove"); } else { f("mouseout"); f("mouseleave"); }
-        };
-        // 用第一个 chip 诊断触发方式
-        const c0 = chips[0];
-        const before = grabVisible().length;
-        c0.el.click(); await new Promise<void>(r => setTimeout(r, 450));
-        const afterClick = grabVisible().length;
-        document.body.click(); await new Promise<void>(r => setTimeout(r, 250));
-        fireHover(c0.el, true); await new Promise<void>(r => setTimeout(r, 450));
-        const afterHover = grabVisible().length;
-        fireHover(c0.el, false); await new Promise<void>(r => setTimeout(r, 200));
-        const clickWorks = afterClick > before;
-        const hoverWorks = afterHover > before;
-        if (!clickWorks && !hoverWorks) {
-          // 都不生效：抓 chip 父容器内隐藏选项样本，帮我定位选项 DOM
-          const nearby = c0.el.parentElement ? [...c0.el.parentElement.querySelectorAll<HTMLElement>("li, [class*='option'], [role='option'], [class*='select']")]
-            .slice(0, 12).map(el => ({ tag: el.tagName, cls: (el.className?.toString?.() || "").slice(0, 50), text: (el.innerText || el.textContent || "").trim().slice(0, 30), visible: (() => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; })() })) : [];
-          // 再往上找一层（祖父容器），看选项是否在更外层
-          const grand = c0.el.parentElement?.parentElement;
-          const grandNearby = grand ? [...grand.querySelectorAll<HTMLElement>("li, [class*='option'], [role='option']")].slice(0, 8).map(el => ({ tag: el.tagName, text: (el.innerText || el.textContent || "").trim().slice(0, 30), visible: (() => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; })() })) : [];
-          sendResponse({ ok: false, error: `click/hover 都未触发下拉面板（before=${before}, afterClick=${afterClick}, afterHover=${afterHover}）。可能 BOSS 用纯 CSS :hover。请把下面的 chip 附近结构贴回。`, firstChip: c0.text, chipTexts: chips.map(c => c.text), nearby, grandNearby });
-          return;
-        }
-        // 用生效方式全量采集
-        const result: Record<string, Array<{ text: string; selected: boolean }>> = {};
-        for (const c of chips) {
-          if (clickWorks) c.el.click(); else fireHover(c.el, true);
-          await new Promise<void>(r => setTimeout(r, 450));
-          const opts = grabVisible();
-          if (opts.length) result[c.dim] = opts;
-          if (clickWorks) document.body.click(); else fireHover(c.el, false);
-          await new Promise<void>(r => setTimeout(r, 250));
-        }
-        await chrome.storage.local.set({ filterOptions: result, filterOptionsAt: new Date().toISOString() });
-        sendResponse({ ok: true, dims: Object.keys(result), options: result, trigger: clickWorks ? "click" : "hover" });
-      } catch (error) {
-        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
-      }
-    })();
+          .map(el => (el.innerText || el.textContent || "").trim())
+          .filter(Boolean);
+        if (!opts.length) return;
+        const key = opts.slice().sort().join("|");
+        const last = listenBatches[listenBatches.length - 1];
+        if (!last || last.slice().sort().join("|") !== key) listenBatches.push(opts);
+      }, 400);
+      sendResponse({ ok: true });
+    } else {
+      if (listenTimer) { clearInterval(listenTimer); listenTimer = null; }
+      const seen = new Set<string>();
+      const dedup: string[][] = [];
+      for (const b of listenBatches) { const k = b.slice().sort().join("|"); if (!seen.has(k)) { seen.add(k); dedup.push(b); } }
+      sendResponse({ ok: true, batches: dedup });
+    }
     return true;
   }
+
 
   if (message.type === "PING") {
     sendResponse({ ok: true, page: location.href });
