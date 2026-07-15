@@ -149,6 +149,16 @@ export interface ApprovalRequest {
   jobs?: Job[];
 }
 
+export interface AgentRecoveryMirror {
+  runId: string;
+  stateVersion: number;
+  updatedAt: string;
+  phase: AgentPhase;
+  approvedForGreet: string[];
+  greeted: string[];
+  currentGreetIndex: number;
+}
+
 export interface AgentActionResult {
   ok: boolean;
   message: string;
@@ -182,4 +192,6 @@ export interface AgentTools {
   saveJobs(jobs: Job[]): Promise<void>;
   setStatus(status: BootstrapStatus): Promise<void>;
   requestApproval(request: Omit<ApprovalRequest, "id" | "createdAt" | "status">): Promise<ApprovalRequest>;
+  setAgentRecovery?(mirror: AgentRecoveryMirror): Promise<void>;
+  getAgentRecovery?(): Promise<AgentRecoveryMirror | null>;
 }

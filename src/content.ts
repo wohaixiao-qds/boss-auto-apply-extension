@@ -233,6 +233,11 @@ const tools: AgentTools = {
     const response = await runtimeMessage<{ ok: boolean; approval?: import("./types").ApprovalRequest }>({ type: "REQUEST_APPROVAL", request });
     if (!response?.ok || !response.approval) throw new Error("无法创建人工确认请求");
     return response.approval;
+  },
+  setAgentRecovery: async mirror => { await runtimeMessage({ type: "SET_AGENT_RECOVERY", mirror }); },
+  getAgentRecovery: async () => {
+    const response = await runtimeMessage<{ ok: boolean; mirror?: import("./types").AgentRecoveryMirror | null }>({ type: "GET_AGENT_RECOVERY" });
+    return response?.mirror ?? null;
   }
 };
 
@@ -264,8 +269,9 @@ chrome.runtime.onMessage.addListener((message: any, _sender, sendResponse) => {
     return true;
   }
   if (message.type === "RESUME_AGENT") {
-    // Task 7-8 接入审批后驱动继续；本任务为 no-op 桩。
+    // 审批通过后由 background 触发；resume() 会从 chrome.storage.local 镜像合并恢复数据后继续循环。
     sendResponse({ ok: true });
+    void runner.resume();
     return false;
   }
   if (message.type === "RESOLVE_UNKNOWN_GREET") {

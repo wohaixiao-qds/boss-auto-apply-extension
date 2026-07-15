@@ -1,4 +1,4 @@
-import type { AgentDecision, ApprovalRequest, Job, JobIntent, Settings } from "./types";
+import type { AgentDecision, AgentRecoveryMirror, ApprovalRequest, Job, JobIntent, Settings } from "./types";
 import { accumulateCost } from "./agent/cost";
 import type { CostAccum } from "./agent/cost";
 
@@ -67,13 +67,40 @@ chrome.runtime.onMessage.addListener((message: any, sender, sendResponse) => {
       return respond(chrome.storage.local.set({ pendingApproval: approval }).then(() => ({ ok: true, approval })));
     }
     case "RESOLVE_APPROVAL": {
-      const status = message.status === "approved" ? "approved" : "rejected";
-      return respond(chrome.storage.local.get({ pendingApproval: null }).then(({ pendingApproval }) => {
+      const selectedUrls: string[] = Array.isArray(message.selectedUrls) ? message.selectedUrls.filter((u: unknown) => typeof u === "string") : [];
+      return respond(chrome.storage.local.get({ pendingApproval: null, agentRecovery: null }).then(({ pendingApproval, agentRecovery }) => {
         if (!pendingApproval || pendingApproval.id !== message.id) throw new Error("确认请求已失效");
-        const resolved = { ...pendingApproval, status } satisfies ApprovalRequest;
-        return chrome.storage.local.set({ pendingApproval: null, lastApproval: resolved }).then(() => ({ ok: true, approval: resolved }));
+        const resolved = { ...pendingApproval, status: selectedUrls.length ? "approved" : "rejected" } satisfies ApprovalRequest;
+        // 二次校验（validateSelectedUrls）在 content 侧执行（rankedJobs 在 content state）。
+        // background 只持久化已批准的 selectedUrls 作为 approvedForGreet，并推进到 greet 阶段。
+        const now = new Date().toISOString();
+        const baseMirror = (agentRecovery || {}) as Partial<AgentRecoveryMirror>;
+        const nextMirror: AgentRecoveryMirror = {
+          runId: baseMirror.runId || "unknown",
+          stateVersion: (baseMirror.stateVersion || 0) + 1,
+          updatedAt: now,
+          phase: "greet",
+          approvedForGreet: selectedUrls,
+          greeted: baseMirror.greeted || [],
+          currentGreetIndex: 0
+        };
+        return chrome.storage.local.set({ pendingApproval: null, lastApproval: resolved, agentRecovery: nextMirror })
+          .then(() => resumeAgent())
+          .then(() => ({ ok: true, approval: resolved }));
       }));
     }
+    case "SET_AGENT_RECOVERY": {
+      const mirror = message.mirror as AgentRecoveryMirror | undefined;
+      if (!mirror || typeof mirror.runId !== "string") {
+        sendResponse({ ok: false, error: "无效的恢复镜像" });
+        return false;
+      }
+      return respond(chrome.storage.local.set({ agentRecovery: mirror }).then(() => ({ ok: true })));
+    }
+    case "GET_AGENT_RECOVERY":
+      return respond(chrome.storage.local.get({ agentRecovery: null }).then(({ agentRecovery }) => ({ ok: true, mirror: agentRecovery })));
+    case "RESUME_AGENT":
+      return respond(resumeAgent().then(() => ({ ok: true })));
     case "SET_BOOTSTRAP_STATUS":
       return respond(chrome.storage.local.set({ bootstrapStatus: message.status || EMPTY_BOOTSTRAP_STATUS, agentState: message.status?.state || null }).then(() => ({ ok: true })));
     case "SAVE_SETTINGS":
@@ -158,6 +185,17 @@ async function callAi(settings: Settings, payload: Record<string, unknown>): Pro
 
 function sanitizeError(message: string): string {
   return String(message || "请求失败").replace(/sk-[A-Za-z0-9_-]+/g, "sk-***");
+}
+
+async function resumeAgent(): Promise<boolean> {
+  const { agentSourceTabId } = await chrome.storage.local.get({ agentSourceTabId: null as number | null });
+  if (!agentSourceTabId) return false;
+  try {
+    await chrome.tabs.sendMessage(agentSourceTabId, { type: "RESUME_AGENT" });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function parseJson<T>(text: unknown): T {

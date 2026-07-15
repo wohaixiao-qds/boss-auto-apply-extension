@@ -1,9 +1,10 @@
 import { buildAgentIntent } from "./intent";
 import { newAgentState, bumpState } from "./state";
 import { snapshotPage } from "./snapshot";
-import { validateDecision } from "./validate";
+import { validateDecision, effectiveQuerySatisfied } from "./validate";
 import { executeBrowserAction } from "./browser-action";
 import { buildLlmPayload } from "./payload";
+import { mergeRecovery } from "./recovery";
 import type { AgentActionResult, AgentDecision, AgentState, AgentStep, AgentTools, Job, PageSnapshot, Settings } from "../types";
 
 const STORAGE_KEY = "boss-agent-state";
@@ -56,6 +57,40 @@ export class AgentRunner {
     this.storage.setItem(STORAGE_KEY, JSON.stringify(this.state));
   }
 
+  private async persistRecovery(): Promise<void> {
+    if (!this.tools.setAgentRecovery) return;
+    try {
+      await this.tools.setAgentRecovery({
+        runId: this.state.runId,
+        stateVersion: this.state.stateVersion,
+        updatedAt: this.state.updatedAt,
+        phase: this.state.phase,
+        approvedForGreet: this.state.approvedForGreet,
+        greeted: this.state.greeted,
+        currentGreetIndex: this.state.currentGreetIndex
+      });
+    } catch {
+      // 恢复镜像写入失败不应阻断主流程。
+    }
+  }
+
+  private async loadRecovery(): Promise<void> {
+    if (!this.tools.getAgentRecovery) return;
+    try {
+      const remote = await this.tools.getAgentRecovery();
+      if (!remote) return;
+      // 镜像是 AgentState 的子集；叠加到本地状态上以形成完整 AgentState 供 mergeRecovery 比较。
+      const remoteState: AgentState = { ...this.state, ...remote };
+      const merged = mergeRecovery(this.state, remoteState);
+      if (merged === remoteState) {
+        this.state = merged;
+        this.persist();
+      }
+    } catch {
+      // 恢复读取失败不应阻断主流程。
+    }
+  }
+
   private persistCandidates(): void {
     this.storage.setItem(CANDIDATES_KEY, JSON.stringify(this.candidates));
   }
@@ -89,6 +124,8 @@ export class AgentRunner {
 
   async resume(): Promise<void> {
     if (TERMINAL_STEPS.includes(this.state.step) || this.running) return;
+    // 从 chrome.storage.local 镜像合并恢复数据（审批通过后由 background 写入）。
+    await this.loadRecovery();
     this.running = true;
     try {
       await this.run();
@@ -156,9 +193,28 @@ export class AgentRunner {
     }
 
     if (decision.action === "request_greet_approval") {
-      // Phase B / 审批由 Task 7-8 接管；本任务只暂停并等待。
+      // 前置三件套（jobsCollected && filterCompleted && ranked）已由 validateDecision 校验通过。
+      // 完成校验：effectiveQuery 是否已在页面落实（或无对应控件）。
+      const { satisfied, missing } = effectiveQuerySatisfied(intent.query, snapshot.currentQuery, snapshot);
+      if (!satisfied) {
+        const message = `筛选未完成：${missing.join("、")}`;
+        this.state = bumpState({ ...this.state, error: message, lastDecision: `request_greet_approval: ${decision.reason}` }, nowIso());
+        this.persist();
+        await this.setStatus(false, message);
+        await sleep(400);
+        return { pause: false };
+      }
+      // 满足 → 请求人工审批打招呼，进入等待。
+      const approval = await this.tools.requestApproval({
+        action: "greet",
+        title: "打招呼审批",
+        description: `已排序 ${this.state.lastRankedJobs.length} 个岗位，是否开始打招呼？`,
+        jobs: this.state.lastRankedJobs
+      });
+      void approval;
       this.state = bumpState({ ...this.state, step: "awaiting_approval", lastDecision: `request_greet_approval: ${decision.reason}` }, nowIso());
       this.persist();
+      await this.persistRecovery();
       await this.setStatus(true, "已请求打招呼审批，等待人工确认", "awaiting_approval");
       return { pause: true };
     }
