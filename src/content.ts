@@ -258,6 +258,31 @@ chrome.runtime.onMessage.addListener((message: any, _sender, sendResponse) => {
     }).catch(error => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }));
     return true;
   }
+  if (message.type === "GET_DIAG_DOM") {
+    // 真实 BOSS DOM 校准探测：不开 DevTools 也能采集关键结构片段。
+    try {
+      const probe = (sel: string): { found: boolean; sel: string; tag?: string; cls?: string; childCount?: number; outer?: string } => {
+        const el = document.querySelector(sel);
+        if (!el) return { found: false, sel };
+        return { found: true, sel, tag: el.tagName, cls: (el.className?.toString?.() || "").slice(0, 80), childCount: el.children.length, outer: el.outerHTML.slice(0, 400) };
+      };
+      const jobContainer = [".job-list-box", ".search-job-result", ".job-list", ".job-card-list", ".job-list-ul", "[class*='job-list']", "[class*='SearchResult']", "[class*='job-result']"].map(probe);
+      const jobCard = [".job-card-wrapper", ".job-card-li", ".job-card", "[class*='job-card']", "li[ka]", "a[href*='/job_detail/']", ".search-job-result-list li"].map(probe);
+      const chipProbe = [".job-filter .filter-item", ".filter-list .filter-item", "[class*='filter-item']", ".filter-item a", ".condition-filter-item"].map(probe);
+      const nav = (() => {
+        const a = [...document.querySelectorAll<HTMLElement>("a, [role='link']")].find(x => /首页/.test((x.innerText || x.textContent || "")));
+        if (!a) return null;
+        const chain: string[] = [];
+        let p: Element | null = a;
+        for (let i = 0; i < 7 && p; i += 1) { chain.push(`${p.tagName}.${(p.className?.toString?.() || "").slice(0, 50)}`); p = p.parentElement; }
+        return { tag: a.tagName, cls: (a.className?.toString?.() || "").slice(0, 60), outer: a.outerHTML.slice(0, 200), ancestors: chain };
+      })();
+      sendResponse({ url: location.href, jobContainer, jobCard, chipProbe, nav });
+    } catch (error) {
+      sendResponse({ error: error instanceof Error ? error.message : String(error) });
+    }
+    return true;
+  }
   if (message.type === "PING") {
     sendResponse({ ok: true, page: location.href });
     return false;
