@@ -40,7 +40,18 @@ export function validateSelectedUrls(urls: string[], rankedJobs: Job[], settings
   const cap = Number(settings.greetCap) || 0;
   const valid: string[] = [];
   const rejected: string[] = [];
+  // 先对输入去重（保留首次出现顺序），避免重复 URL 进入 valid 导致同一岗位被二次打招呼。
+  const seen = new Set<string>();
+  const deduped: string[] = [];
   for (const url of urls) {
+    if (seen.has(url)) {
+      rejected.push(`${url}（重复）`);
+    } else {
+      seen.add(url);
+      deduped.push(url);
+    }
+  }
+  for (const url of deduped) {
     let reason = "";
     try { if (!/(^|\.)zhipin\.com$/i.test(new URL(url).hostname)) reason = "非 zhipin 域"; } catch { reason = "无效 URL"; }
     if (!reason && !ranked.has(url)) reason = "不在本次排序结果";

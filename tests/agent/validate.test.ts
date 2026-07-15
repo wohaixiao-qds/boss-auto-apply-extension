@@ -86,4 +86,13 @@ describe("validateSelectedUrls", () => {
     expect(r.valid).toEqual(["https://www.zhipin.com/job_detail/1"]);
     expect(r.rejected.length).toBe(3);
   });
+  it("dedups duplicate URLs (valid has no duplicates, dup in rejected)", () => {
+    const dup = "https://www.zhipin.com/job_detail/1";
+    const urls = [dup, dup, dup];
+    const r = validateSelectedUrls(urls, jobs, settings);
+    expect(r.valid).toEqual([dup]);
+    expect(r.valid.length).toBe(1);
+    expect(r.rejected.length).toBe(2);
+    expect(r.rejected.every(x => x.includes("重复"))).toBe(true);
+  });
 });

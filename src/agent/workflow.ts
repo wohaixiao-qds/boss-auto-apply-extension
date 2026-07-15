@@ -166,6 +166,8 @@ export class AgentRunner {
     if (!this.state.approvedForGreet.length) return;
     if (this.state.currentGreetIndex !== 0 || this.state.greeted.length > 0) return;
     const settings = await this.tools.getSettings();
+    // 进入 Phase B 时用 Settings.greetCap 覆盖默认值（newAgentState 硬编码为 10）。
+    this.state.greetCap = Number(settings.greetCap) || 10;
     const { valid, rejected } = validateSelectedUrls(this.state.approvedForGreet, this.state.lastRankedJobs, settings);
     if (rejected.length) {
       this.state = bumpState({ ...this.state, approvedForGreet: valid, error: rejected.length ? `已拒绝未通过校验的 URL：${rejected.join("; ")}` : this.state.error }, nowIso());
@@ -194,6 +196,17 @@ export class AgentRunner {
       return { handled: true, pause: true };
     }
     const status = this.state.greetStatus[url] ?? "pending";
+
+    // 双重判重防护：当前 url 已是终态（verified/failed）或已记入 greeted[]，
+    // 直接推进指针，不落入 LLM 单步（避免对已打招呼的 URL 二次打招呼）。
+    if (status === "verified" || status === "failed" || this.state.greeted.includes(url)) {
+      this.state.currentGreetIndex += 1;
+      this.state.currentGreetUrl = "";
+      this.state = bumpState({ ...this.state, lastDecision: `skip already-greeted: ${url}（${status}）` }, nowIso());
+      this.persist();
+      await this.persistRecovery();
+      return { handled: true, pause: false };
+    }
 
     // 当前岗位尚未打开 → Runtime 自动导航打开。
     if (status === "pending") {
