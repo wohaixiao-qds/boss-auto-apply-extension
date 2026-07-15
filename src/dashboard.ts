@@ -313,6 +313,58 @@ $("clearData").addEventListener("click", async () => {
   await refresh();
 });
 $("settings").addEventListener("click", () => void chrome.runtime.openOptionsPage());
+
+// 诊断快照：在不开 DevTools（BOSS 反调试会闪退）的前提下，直接在侧栏查看 content script
+// 对当前页的解析结果（snapshot.elements / currentQuery），并标注关键控件是否命中。
+$("diagSnapshot").addEventListener("click", async () => {
+  const out = $("diagOutput");
+  out.hidden = false;
+  out.textContent = "正在解析当前 BOSS 页面…";
+  const tab = await sourceTab();
+  if (!tab?.id) { out.textContent = "未找到 BOSS 标签页（请先在 zhipin.com 打开职位列表）"; return; }
+  const result = await tabsMessage<{ snapshot?: { elements?: unknown[]; currentQuery?: Record<string, unknown>; kind?: string; url?: string }; error?: string }>(tab.id, { type: "GET_AGENT_CONTEXT" });
+  if (!result?.snapshot) { out.textContent = `取快照失败：${result?.error || "content script 未响应（扩展是否已重载？）"}`; return; }
+  const snap = result.snapshot;
+  const els = Array.isArray(snap.elements) ? snap.elements as Array<{ id: string; role: string; text: string; region: string; current?: string; checked?: boolean }> : [];
+  const has = (pred: (e: typeof els[number]) => boolean) => els.some(pred);
+  const lines: string[] = [];
+  lines.push(`页面：${snap.kind || "?"}  ${snap.url || ""}`);
+  lines.push(`元素：${els.length} 个`);
+  const cq = snap.currentQuery || {};
+  const cqSummary = ["keyword","location","salary","jobTypes","workModes","experience","education","industries","companySizes"]
+    .map(k => { const v = cq[k]; const arr = Array.isArray(v) ? v.filter(Boolean) : (v ? [String(v)] : []); return arr.length ? `${k}=${arr.join("/")}` : null; })
+    .filter(Boolean).join("  ");
+  lines.push(`currentQuery：${cqSummary || "（空）"}`);
+  lines.push("");
+  lines.push("命中检查（决定后续 LLM 能否操作）：");
+  const mark = (ok: boolean, label: string) => `  ${ok ? "✓" : "✗"} ${label}`;
+  const searchOk = has(e => e.region === "search" || /input/i.test(e.role));
+  const salaryChip = els.find(e => e.region === "filter" && /薪资|薪水/.test(e.text));
+  const expChip = els.find(e => e.region === "filter" && /经验/.test(e.text));
+  const eduChip = els.find(e => e.region === "filter" && /学历/.test(e.text));
+  const pager = has(e => e.region === "pager");
+  const chatSend = has(e => e.region === "chat" && /发送|send/i.test(e.text));
+  const jobCount = els.filter(e => e.region === "job").length;
+  lines.push(`<span class="${searchOk ? "ok" : "miss"}">${mark(searchOk, "搜索框")}</span>`);
+  lines.push(`<span class="${salaryChip ? "ok" : "miss"}">${mark(Boolean(salaryChip), `薪资 chip${salaryChip ? `（当前=${salaryChip.current || "不限"}）` : ""}`)}</span>`);
+  lines.push(`<span class="${expChip ? "ok" : "miss"}">${mark(Boolean(expChip), `经验 chip${expChip ? `（当前=${expChip.current || "不限"}）` : ""}`)}</span>`);
+  lines.push(`<span class="${eduChip ? "ok" : "miss"}">${mark(Boolean(eduChip), `学历 chip${eduChip ? `（当前=${eduChip.current || "不限"}）` : ""}`)}</span>`);
+  lines.push(`<span class="${jobCount > 0 ? "ok" : "miss"}">${mark(jobCount > 0, `岗位卡（${jobCount}）`)}</span>`);
+  lines.push(`<span class="${pager ? "ok" : "miss"}">${mark(pager, "分页控件")}</span>`);
+  lines.push(`<span class="${chatSend ? "ok" : "miss"}">${mark(chatSend, "沟通发送按钮（需在岗位详情/沟通窗）")}</span>`);
+  lines.push("");
+  lines.push("elements（前 40）：");
+  for (const e of els.slice(0, 40)) {
+    const parts = [`[e${e.id}]`, e.role, `"${esc((e.text || "").slice(0, 30))}"`];
+    if (e.current) parts.push(`cur="${esc(e.current)}"`);
+    if (e.checked) parts.push("✓");
+    parts.push(`@${e.region}`);
+    lines.push(parts.join(" "));
+  }
+  if (els.length > 40) lines.push(`…还有 ${els.length - 40} 个`);
+  out.innerHTML = lines.join("\n");
+});
+
 for (const [id, kind] of [["approveAction", "approve"], ["rejectAction", "reject"]] as const) {
   $(id).addEventListener("click", async () => {
     const approvalId = ($(id) as HTMLButtonElement).dataset.approvalId;
