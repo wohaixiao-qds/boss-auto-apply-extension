@@ -1,0 +1,31 @@
+<!--
+  合成 fixture（SYNTHETIC）：模拟 BOSS 直聘职位列表页岗位卡 + 分页结构。
+  .job-list 内含若干 .job-card-wrapper（li），底部 .pager 含「下一页」。
+  选择器对齐 src/agent/snapshot.ts 的 regionOf（.job-card-wrapper / .pager / 下一页）。
+  待真实样本替换（见 tests/integration/FIXTURE-CAPTURE.md）。
+-->
+<div class="job-box">
+  <ul class="job-list">
+    <li class="job-card-wrapper" ka="job-card">
+      <a href="/job_detail/1001.html" class="job-title">Java 高级工程师</a>
+      <span class="company">某科技公司</span>
+      <span class="salary">20-35K</span>
+    </li>
+    <li class="job-card-wrapper" ka="job-card">
+      <a href="/job_detail/1002.html" class="job-title">后端开发工程师</a>
+      <span class="company">某互联网公司</span>
+      <span class="salary">18-30K</span>
+    </li>
+    <li class="job-card-wrapper" ka="job-card">
+      <a href="/job_detail/1003.html" class="job-title">资深 Java 架构师</a>
+      <span class="company">某金融科技</span>
+      <span class="salary">30-50K</span>
+    </li>
+  </ul>
+  <div class="pager">
+    <a class="prev" ka="page-prev">上一页</a>
+    <a class="page" ka="page-1">1</a>
+    <a class="page cur" ka="page-2">2</a>
+    <a class="next" ka="page-next">下一页</a>
+  </div>
+</div>
