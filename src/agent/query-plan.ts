@@ -8,14 +8,14 @@ function prefer(userValue: string, currentValue: string[]): string[] {
 }
 
 export function mergeBossQueryWithUser(current: BossQueryContext, settings: Settings): EffectiveQuery {
-  const userKeywords = lines(settings.jobKeywords || settings.jobIntent.targetTitles.join("\n"));
-  const userLocations = lines(settings.targetLocations || settings.jobIntent.locations.join("\n"));
-  const userSalary = lines(settings.targetSalary || settings.jobIntent.salary);
-  const userWorkModes = lines(settings.workMode || settings.jobIntent.workModes.join("\n"));
+  const userKeywords = lines(settings.jobKeywords);
+  const userLocations = lines(settings.targetLocations);
+  const userSalary = lines(settings.targetSalary);
+  const userWorkModes = lines(settings.workMode);
   const query: EffectiveQuery = {
     keyword: userKeywords.length ? userKeywords.slice(0, 3).join(" ") : current.keyword,
-    location: prefer(settings.targetLocations || settings.jobIntent.locations.join("\n"), current.location),
-    salary: prefer(settings.targetSalary || settings.jobIntent.salary, current.salary),
+    location: prefer(settings.targetLocations, current.location),
+    salary: prefer(settings.targetSalary, current.salary),
     jobTypes: prefer(settings.jobTypes, current.jobTypes),
     workModes: userWorkModes.length ? userWorkModes : current.workModes,
     experience: prefer(settings.workExperience, current.experience),
