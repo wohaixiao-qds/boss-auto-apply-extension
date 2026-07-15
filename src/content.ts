@@ -277,7 +277,21 @@ chrome.runtime.onMessage.addListener((message: any, _sender, sendResponse) => {
         for (let i = 0; i < 7 && p; i += 1) { chain.push(`${p.tagName}.${(p.className?.toString?.() || "").slice(0, 50)}`); p = p.parentElement; }
         return { tag: a.tagName, cls: (a.className?.toString?.() || "").slice(0, 60), outer: a.outerHTML.slice(0, 200), ancestors: chain };
       })();
-      sendResponse({ url: location.href, jobContainer, jobCard, chipProbe, nav });
+      // 抓取当前打开的下拉面板里的选项（用户先手动点开某个筛选，再跑探测）。
+      // 候选：带 role=option、class 含 option/select/dropdown-menu、或带 aria-selected 的元素。
+      const optionCandidates = [...document.querySelectorAll<HTMLElement>("[role='option'], [role='menuitemcheckbox'], [class*='filter-option'], [class*='dropdown-item'], [class*='select-item'], li[aria-selected], .multiple-chosen li, [class*='multiple'] li")]
+        .filter(el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
+        .map(el => ({ tag: el.tagName, cls: (el.className?.toString?.() || "").slice(0, 60), text: (el.innerText || el.textContent || "").trim().slice(0, 30), selected: el.getAttribute("aria-selected") === "true" || el.getAttribute("aria-checked") === "true" || el.classList.contains("selected") || el.classList.contains("active") }))
+        .filter(o => o.text);
+      // 选项面板容器样本（取第一个 option 的祖先容器）
+      const panelSample = (() => {
+        const first = document.querySelector<HTMLElement>("[role='option'], [class*='filter-option'], [class*='dropdown-item'], li[aria-selected]");
+        let p: Element | null = first;
+        for (let i = 0; i < 4 && p; i += 1) p = p.parentElement;
+        return p ? { tag: p.tagName, cls: (p.className?.toString?.() || "").slice(0, 80), outer: p.outerHTML.slice(0, 400) } : null;
+      })();
+      sendResponse({ url: location.href, jobContainer, jobCard, chipProbe, nav, optionCandidates: optionCandidates.slice(0, 60), panelSample });
+
     } catch (error) {
       sendResponse({ error: error instanceof Error ? error.message : String(error) });
     }

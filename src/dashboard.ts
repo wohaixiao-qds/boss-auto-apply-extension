@@ -408,6 +408,16 @@ $("diagDom").addEventListener("click", async () => {
   if (jcard?.outer) lines.push(`[岗位卡 ${jcard.sel}]`, esc2(jcard.outer));
   if (chip?.outer) lines.push(`[chip ${chip.sel}]`, esc2(chip.outer));
   if (!jc && !jcard && !chip) lines.push("（以上候选均未命中——需要你贴一段岗位区域的 HTML）");
+  // 当前打开的下拉选项（用户先手动点开某个筛选，再点 DOM 探测）
+  const opts = (r as { optionCandidates?: Array<{ tag?: string; cls?: string; text?: string; selected?: boolean }> }).optionCandidates;
+  const panel = (r as { panelSample?: { tag?: string; cls?: string; outer?: string } | null }).panelSample;
+  if (opts && opts.length) {
+    lines.push("", `=== 当前打开的下拉选项（${opts.length} 个）===`);
+    for (const o of opts) lines.push(`  ${o.selected ? "☑" : "☐"} ${esc2(o.text || "")}  <${o.tag} class="${esc2(o.cls || "")}">`);
+  } else {
+    lines.push("", "=== 当前打开的下拉选项 ===", "（无——请先在 BOSS 页面手动点开一个筛选下拉，再点 DOM 探测）");
+  }
+  if (panel?.outer) lines.push("", "[选项面板容器]", esc2(panel.outer));
   out.innerHTML = lines.join("\n");
 });
 
