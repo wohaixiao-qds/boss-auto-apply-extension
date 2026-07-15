@@ -101,6 +101,28 @@ chrome.runtime.onMessage.addListener((message: any, sender, sendResponse) => {
       return respond(chrome.storage.local.get({ agentRecovery: null }).then(({ agentRecovery }) => ({ ok: true, mirror: agentRecovery })));
     case "RESUME_AGENT":
       return respond(resumeAgent().then(() => ({ ok: true })));
+    case "RESOLVE_UNKNOWN_GREET": {
+      const url = typeof message.url === "string" ? message.url : "";
+      const verdict: "sent" | "skipped" = message.verdict === "sent" ? "sent" : "skipped";
+      return respond(chrome.storage.local.get({ agentRecovery: null as AgentRecoveryMirror | null }).then(({ agentRecovery }) => {
+        if (!url) throw new Error("缺少岗位 URL");
+        const base = (agentRecovery || {}) as Partial<AgentRecoveryMirror>;
+        const greeted = Array.from(new Set([...(base.greeted || []), ...(verdict === "sent" ? [url] : [])]));
+        const now = new Date().toISOString();
+        const nextMirror: AgentRecoveryMirror = {
+          runId: base.runId || "unknown",
+          stateVersion: (base.stateVersion || 0) + 1,
+          updatedAt: now,
+          phase: "greet",
+          approvedForGreet: base.approvedForGreet || [],
+          greeted,
+          currentGreetIndex: (base.currentGreetIndex || 0) + 1
+        };
+        return chrome.storage.local.set({ agentRecovery: nextMirror })
+          .then(() => forwardUnknownGreet(url, verdict))
+          .then(() => ({ ok: true }));
+      }));
+    }
     case "SET_BOOTSTRAP_STATUS":
       return respond(chrome.storage.local.set({ bootstrapStatus: message.status || EMPTY_BOOTSTRAP_STATUS, agentState: message.status?.state || null }).then(() => ({ ok: true })));
     case "SAVE_SETTINGS":
@@ -196,6 +218,18 @@ async function resumeAgent(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function forwardUnknownGreet(url: string, verdict: "sent" | "skipped"): Promise<void> {
+  // 通知 content 侧把 greetStatus[url] 置 verified/failed 并推进；随后由 resumeAgent 继续循环。
+  const { agentSourceTabId } = await chrome.storage.local.get({ agentSourceTabId: null as number | null });
+  if (!agentSourceTabId) return;
+  try {
+    await chrome.tabs.sendMessage(agentSourceTabId, { type: "RESOLVE_UNKNOWN_GREET", url, verdict });
+  } catch {
+    // 标签页不可达时忽略；恢复镜像已持久化，下次 resume 会承接。
+  }
+  await resumeAgent();
 }
 
 function parseJson<T>(text: unknown): T {

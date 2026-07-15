@@ -186,6 +186,7 @@ export interface AgentTools {
   hasJobCards(): boolean;
   findJobsEntry(): Promise<HTMLElement | null>;
   navigate(element: HTMLElement): Promise<void>;
+  navigateToUrl?(url: string): Promise<void>;
   extractJobs(): Promise<Job[]>;
   filterJobs(jobs: Job[]): Promise<Job[]>;
   rankJobs(jobs: Job[]): Promise<Job[]>;

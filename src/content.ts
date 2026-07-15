@@ -202,9 +202,10 @@ const tools: AgentTools = {
   },
   validateDecision,
   executeBrowserAction,
-  runRuntimeAction: async (_action: RuntimeAction): Promise<AgentActionResult> => {
-    // Task 7-9 接入；本任务返回未实现。
-    return { ok: false, message: "runtime action 暂未接入" };
+  runRuntimeAction: async (action: RuntimeAction): Promise<AgentActionResult> => {
+    // Phase B 的 Runtime 编排（open_approved_job/finish）由 AgentRunner 内部基于 state 直接驱动，
+    // 不经此 tool（tool 无 runner state 访问权）。保留接口签名以兼容 AgentTools 契约。
+    return { ok: false, message: `${action} 由 runner 内部处理，不应经此 tool` };
   },
   isJobListPage,
   hasJobCards,
@@ -223,6 +224,13 @@ const tools: AgentTools = {
       return;
     }
     element.click();
+  },
+  navigateToUrl: async (url: string) => {
+    // Phase B Runtime 打开已批准岗位：交给 background 在源标签页导航（同源 zhipin）。
+    let parsed: URL;
+    try { parsed = new URL(url); } catch { throw new Error("无效的岗位 URL"); }
+    if (!/(^|\.)zhipin\.com$/i.test(parsed.hostname)) throw new Error("非 zhipin 域，已拒绝导航");
+    await runtimeMessage({ type: "NAVIGATE_SOURCE_TAB", url: parsed.href });
   },
   extractJobs: extractVisibleJobs,
   filterJobs,
@@ -275,8 +283,14 @@ chrome.runtime.onMessage.addListener((message: any, _sender, sendResponse) => {
     return false;
   }
   if (message.type === "RESOLVE_UNKNOWN_GREET") {
-    // Task 7-8 接入未知打招呼处理；本任务为 no-op 桩。
+    // 人工裁决未知打招呼结果：sent→verified（入 greeted），skipped→failed。
+    const url = typeof message.url === "string" ? message.url : "";
+    const verdict = message.verdict === "sent" ? "sent" : "skipped";
     sendResponse({ ok: true });
+    if (url) {
+      runner.resolveUnknownGreet(url, verdict);
+      void runner.resume();
+    }
     return false;
   }
   return false;
