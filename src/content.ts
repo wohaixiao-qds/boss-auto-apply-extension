@@ -298,40 +298,67 @@ chrome.runtime.onMessage.addListener((message: any, _sender, sendResponse) => {
     return true;
   }
   if (message.type === "COLLECT_FILTER_OPTIONS") {
-    // 自动采集 BOSS 筛选下拉的真实选项：逐个 hover 每个筛选 chip → 抓取面板选项 → 移走关闭 → 下一个。
-    // 全程由 content script 在页面内驱动，不依赖用户手动打开（BOSS 下拉 hover 移出即消失）。
+    // 先诊断 click / hover 哪个能触发下拉面板，再用生效方式全量采集；
+    // 都不生效则返回附近隐藏选项样本（BOSS 可能用纯 CSS :hover，程序化事件触发不了）。
     (async () => {
       try {
         const snap = snapshotPage();
         const chips = snap.elements
           .map(e => ({ el: resolveRef(e.id), dim: classifyChip(e.text), text: e.text }))
           .filter(c => c.el && c.dim) as Array<{ el: HTMLElement; dim: string; text: string }>;
-        const hover = (el: HTMLElement, enter: boolean) => {
-          const fire = (type: string) => el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, relatedTarget: enter ? null : el }));
-          if (enter) { fire("mouseenter"); fire("mouseover"); fire("mousemove"); }
-          else { fire("mouseout"); fire("mouseleave"); }
-        };
-        const grab = () => [...document.querySelectorAll<HTMLElement>("[role='option'], [role='menuitemcheckbox'], [class*='filter-option'], [class*='dropdown-item'], [class*='select-item'], li[aria-selected], [class*='multiple'] li")]
+        if (!chips.length) {
+          sendResponse({ ok: false, error: "未找到筛选 chip（snapshotPage 未抓到 region=filter 且文本匹配维度的元素）", filterTexts: snap.elements.filter(e => e.region === "filter").map(e => e.text) });
+          return;
+        }
+        const OPT = "[role='option'], [role='menuitemcheckbox'], [class*='filter-option'], [class*='dropdown-item'], [class*='select-item'], li[aria-selected], [class*='multiple'] li";
+        const grabVisible = () => [...document.querySelectorAll<HTMLElement>(OPT)]
           .filter(el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
-          .map(el => ({ text: (el.innerText || el.textContent || "").trim(), selected: el.getAttribute("aria-selected") === "true" || el.getAttribute("aria-checked") === "true" || el.classList.contains("selected") || el.classList.contains("active") || el.classList.contains("chosen") }))
+          .map(el => ({ text: (el.innerText || el.textContent || "").trim(), selected: el.getAttribute("aria-selected") === "true" || el.classList.contains("selected") || el.classList.contains("active") }))
           .filter(o => o.text);
+        const fireHover = (el: HTMLElement, enter: boolean) => {
+          const f = (t: string) => el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
+          if (enter) { f("mouseenter"); f("mouseover"); f("mousemove"); } else { f("mouseout"); f("mouseleave"); }
+        };
+        // 用第一个 chip 诊断触发方式
+        const c0 = chips[0];
+        const before = grabVisible().length;
+        c0.el.click(); await new Promise<void>(r => setTimeout(r, 450));
+        const afterClick = grabVisible().length;
+        document.body.click(); await new Promise<void>(r => setTimeout(r, 250));
+        fireHover(c0.el, true); await new Promise<void>(r => setTimeout(r, 450));
+        const afterHover = grabVisible().length;
+        fireHover(c0.el, false); await new Promise<void>(r => setTimeout(r, 200));
+        const clickWorks = afterClick > before;
+        const hoverWorks = afterHover > before;
+        if (!clickWorks && !hoverWorks) {
+          // 都不生效：抓 chip 父容器内隐藏选项样本，帮我定位选项 DOM
+          const nearby = c0.el.parentElement ? [...c0.el.parentElement.querySelectorAll<HTMLElement>("li, [class*='option'], [role='option'], [class*='select']")]
+            .slice(0, 12).map(el => ({ tag: el.tagName, cls: (el.className?.toString?.() || "").slice(0, 50), text: (el.innerText || el.textContent || "").trim().slice(0, 30), visible: (() => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; })() })) : [];
+          // 再往上找一层（祖父容器），看选项是否在更外层
+          const grand = c0.el.parentElement?.parentElement;
+          const grandNearby = grand ? [...grand.querySelectorAll<HTMLElement>("li, [class*='option'], [role='option']")].slice(0, 8).map(el => ({ tag: el.tagName, text: (el.innerText || el.textContent || "").trim().slice(0, 30), visible: (() => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; })() })) : [];
+          sendResponse({ ok: false, error: `click/hover 都未触发下拉面板（before=${before}, afterClick=${afterClick}, afterHover=${afterHover}）。可能 BOSS 用纯 CSS :hover。请把下面的 chip 附近结构贴回。`, firstChip: c0.text, chipTexts: chips.map(c => c.text), nearby, grandNearby });
+          return;
+        }
+        // 用生效方式全量采集
         const result: Record<string, Array<{ text: string; selected: boolean }>> = {};
         for (const c of chips) {
-          hover(c.el, true);
+          if (clickWorks) c.el.click(); else fireHover(c.el, true);
           await new Promise<void>(r => setTimeout(r, 450));
-          const opts = grab();
+          const opts = grabVisible();
           if (opts.length) result[c.dim] = opts;
-          hover(c.el, false);
+          if (clickWorks) document.body.click(); else fireHover(c.el, false);
           await new Promise<void>(r => setTimeout(r, 250));
         }
         await chrome.storage.local.set({ filterOptions: result, filterOptionsAt: new Date().toISOString() });
-        sendResponse({ ok: true, dims: Object.keys(result), options: result });
+        sendResponse({ ok: true, dims: Object.keys(result), options: result, trigger: clickWorks ? "click" : "hover" });
       } catch (error) {
         sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
       }
     })();
     return true;
   }
+
   if (message.type === "PING") {
     sendResponse({ ok: true, page: location.href });
     return false;

@@ -430,7 +430,16 @@ $("collectOptions").addEventListener("click", async () => {
   const tab = await sourceTab();
   if (!tab?.id) { out.textContent = "未找到 BOSS 标签页"; return; }
   const r = await tabsMessage<{ ok?: boolean; dims?: string[]; options?: Record<string, Array<{ text: string; selected: boolean }>>; error?: string }>(tab.id, { type: "COLLECT_FILTER_OPTIONS" });
-  if (!r?.ok) { out.textContent = `采集失败：${r?.error || "content script 未响应（重载扩展+刷新 BOSS 页）"}`; return; }
+  if (!r?.ok) {
+    const d = r as { error?: string; firstChip?: string; chipTexts?: string[]; nearby?: Array<{ tag?: string; cls?: string; text?: string; visible?: boolean }>; grandNearby?: Array<{ tag?: string; text?: string; visible?: boolean }> };
+    const lines: string[] = [`采集失败：${d.error || "content script 未响应（重载扩展+刷新 BOSS 页）"}`];
+    if (d.firstChip) lines.push(`首个 chip：${esc(d.firstChip)}`);
+    if (d.chipTexts?.length) lines.push(`找到的 chip（${d.chipTexts.length}）：${d.chipTexts.map(esc).join(" / ")}`);
+    if (d.nearby?.length) { lines.push("", "chip 父容器内元素样本："); for (const x of d.nearby) lines.push(`  <${x.tag} class="${esc(x.cls || "")}">${esc(x.text || "")} ${x.visible ? "（可见）" : "（隐藏）"}`); }
+    if (d.grandNearby?.length) { lines.push("", "chip 祖父容器内元素样本："); for (const x of d.grandNearby) lines.push(`  <${x.tag}>${esc(x.text || "")} ${x.visible ? "（可见）" : "（隐藏）"}`); }
+    out.innerHTML = lines.join("\n");
+    return;
+  }
   const lines: string[] = [`已采集 ${r.dims?.length || 0} 个维度的选项（已存入 storage.filterOptions）`];
   const dimName: Record<string, string> = { salary: "薪资", jobTypes: "求职类型", experience: "经验", education: "学历", industries: "行业", companySizes: "规模", location: "城市" };
   for (const [dim, opts] of Object.entries(r.options || {})) {
