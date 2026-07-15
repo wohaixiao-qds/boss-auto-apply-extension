@@ -274,10 +274,20 @@ export class AgentRunner {
     return { handled: true, pause: false };
   }
 
-  /** Phase B 完成。 */
+  /** Phase B 完成。区分“被拒绝（进入 greet 时批准列表为空）”与“正常完成”。 */
   private async finishGreet(): Promise<void> {
     const greeted = this.state.greeted.length;
     const total = this.state.approvedForGreet.length;
+    // 拒绝路径：进入打招呼阶段时批准列表就是空（用户在审批清单点了“拒绝”）。
+    // spec §6：拒绝=终止本次任务，不 greet；报“已拒绝”而非“完成 0/N”。
+    if (total === 0) {
+      const message = "已拒绝审批，未发送任何招呼";
+      this.state = bumpState({ ...this.state, phase: "greet", step: "done", error: "", lastDecision: "finish: rejected, no greet", currentGreetUrl: "" }, nowIso());
+      this.persist();
+      await this.persistRecovery();
+      await this.setStatus(true, message, "done");
+      return;
+    }
     const message = `打招呼阶段完成：已打招呼 ${greeted}/${Math.min(total, this.state.greetCap)}`;
     this.state = bumpState({ ...this.state, phase: "greet", step: "done", error: "", lastDecision: "finish: greet done", currentGreetUrl: "" }, nowIso());
     this.persist();
