@@ -267,6 +267,9 @@ async function refresh(): Promise<void> {
   renderAgentContext(context, status);
   if (status?.message) setNotice(status.message, status.ok === false);
   renderApproval(approval?.pendingApproval || null);
+  const { agentLog = [] } = await chrome.storage.local.get({ agentLog: [] as string[] });
+  const logEl = document.getElementById("decisionLog");
+  if (logEl) logEl.textContent = agentLog.slice(-15).join("\n");
 }
 
 async function bootstrap(restart = true): Promise<void> {

@@ -7,9 +7,24 @@ import { buildLlmPayload } from "./payload";
 import { mergeRecovery } from "./recovery";
 import { nextGreetStatus, greetVerify } from "./greet";
 import { shouldBreak, recordAction } from "./guardrails";
-import type { AgentActionResult, AgentDecision, AgentState, AgentStep, AgentTools, Job, PageSnapshot, Settings } from "../types";
+import type { AgentActionResult, AgentDecision, AgentState, AgentStep, AgentTools, BossQueryContext, Job, PageSnapshot, Settings } from "../types";
 
 const STORAGE_KEY = "boss-agent-state";
+
+// 决策日志：每轮把 action+ref+reason+页面当前 cur 写入 chrome.storage.agentLog，dashboard 读显示，便于诊断。
+async function logDecision(line: string): Promise<void> {
+  try {
+    const { agentLog = [] } = await chrome.storage.local.get({ agentLog: [] as string[] });
+    agentLog.push(`${new Date().toISOString().slice(11, 19)} ${line}`);
+    await chrome.storage.local.set({ agentLog: agentLog.slice(-40) });
+  } catch { /* 日志失败不影响主流程 */ }
+}
+function describeQuery(q: BossQueryContext): string {
+  const parts: string[] = [];
+  if (q.keyword) parts.push(`关键词=${q.keyword}`);
+  for (const [k, v] of Object.entries(q)) if (Array.isArray(v) && v.length) parts.push(`${k}=${(v as string[]).join("/")}`);
+  return parts.join(" ") || "（空）";
+}
 const CANDIDATES_KEY = "boss-agent-candidates";
 const TERMINAL_STEPS: AgentStep[] = ["done", "failed"];
 const MAX_TURNS = 50;
@@ -390,6 +405,7 @@ export class AgentRunner {
 
     const planned = await this.tools.planAction(payload);
     const decision = planned.decision;
+    void logDecision(`T${this.state.phaseTurns} ${decision.action} ${decision.ref ?? ""}${decision.value ? `="${decision.value.slice(0, 15)}"` : ""} | ${decision.reason.slice(0, 50)} | 页面cur: ${describeQuery(snapshot.currentQuery)}`);
     const ctx = {
       snapshot,
       phase: this.state.phase,

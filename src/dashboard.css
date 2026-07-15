@@ -33,3 +33,5 @@ body.embedded .topbar { padding:.8rem 1.1rem; } body.embedded .eyebrow { display
 .diag-output { white-space:pre-wrap; word-break:break-word; font-family:ui-monospace,Menlo,monospace; font-size:.72rem; line-height:1.35; background:#0b1020; color:#e5e7eb; padding:.6rem .7rem; border-radius:.5rem; max-height:50vh; overflow:auto; margin:.4rem 0 0; }
 .diag-output .ok { color:#34d399; }
 .diag-output .miss { color:#fbbf24; font-weight:600; }
+.decision-log { white-space:pre-wrap; word-break:break-word; font-family:ui-monospace,Menlo,monospace; font-size:.72rem; line-height:1.4; background:#0b1020; color:#cbd5e1; padding:.6rem .7rem; border-radius:.5rem; max-height:240px; overflow:auto; }
+.decision-log:empty::before { content:"（Agent 还没动作）"; color:#64748b; }
