@@ -14,13 +14,13 @@
         <legend>岗位查询条件</legend>
         <label>岗位关键词（每行一个）<textarea id="jobKeywords" rows="3" placeholder="前端\n全栈\nAI 应用"></textarea></label>
         <label>目标城市（每行一个）<textarea id="targetLocations" rows="2" placeholder="北京\n上海"></textarea></label>
-        <label>期望薪资<input id="targetSalary" placeholder="例如 25-40K" /></label>
-        <label>求职类型<input id="jobTypes" placeholder="全职" /></label>
+        <label>期望薪资</label><div class="opt-group" id="targetSalaryGroup"></div>
+        <label>求职类型</label><div class="opt-group" id="jobTypesGroup"></div>
         <label>工作方式<input id="workMode" placeholder="远程 / 混合办公" /></label>
-        <label>工作经验<input id="workExperience" placeholder="5-10年" /></label>
-        <label>学历要求<input id="education" placeholder="本科" /></label>
+        <label>工作经验</label><div class="opt-group" id="workExperienceGroup"></div>
+        <label>学历要求</label><div class="opt-group" id="educationGroup"></div>
         <label>公司行业<input id="companyIndustries" placeholder="互联网 / 软件" /></label>
-        <label>公司规模<input id="companySizes" placeholder="100-499人" /></label>
+        <label>公司规模</label><div class="opt-group" id="companySizesGroup"></div>
         <label>最大翻页数<input id="maxPages" type="number" min="1" max="20" placeholder="5" /></label>
         <label>排除公司（每行一个）<textarea id="excludeCompanies" rows="3"></textarea></label>
         <label>最低匹配分数<input id="minMatchScore" type="number" min="0" max="100" /></label>
