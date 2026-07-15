@@ -1,88 +1,46 @@
 import { buildAgentIntent } from "./intent";
-import type { AgentAction, AgentContext, AgentDecision, AgentState, AgentStep, AgentTools, BootstrapStatus, Job } from "../types";
-import { AgentTaskQueue } from "./task-queue";
+import { newAgentState, bumpState } from "./state";
+import { snapshotPage } from "./snapshot";
+import { validateDecision } from "./validate";
+import { executeBrowserAction } from "./browser-action";
+import { buildLlmPayload } from "./payload";
+import type { AgentActionResult, AgentDecision, AgentState, AgentStep, AgentTools, Job, PageSnapshot, Settings } from "../types";
 
 const STORAGE_KEY = "boss-agent-state";
 const CANDIDATES_KEY = "boss-agent-candidates";
 const TERMINAL_STEPS: AgentStep[] = ["done", "failed"];
-const MAX_TURNS = 40;
+const MAX_TURNS = 50;
 
-const ACTION_STEP: Partial<Record<AgentAction, AgentStep>> = {
-  click: "apply_filters",
-  fill: "apply_filters",
-  select: "apply_filters",
-  scroll: "extract_jobs",
-  next_page: "extract_jobs",
-  open_profile: "find_profile",
-  import_profile: "analyze_profile",
-  open_jobs: "find_jobs",
-  apply_filters: "apply_filters",
-  collect_jobs: "extract_jobs",
-  filter_jobs: "filter_jobs",
-  rank_jobs: "rank_jobs",
-  finish: "done",
-  pause: "awaiting_input"
-};
+const nowIso = (): string => new Date().toISOString();
+const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
 
-const nextState = (state: AgentState, step: AgentStep, error = ""): AgentState => ({
-  ...state,
-  step,
-  error,
-  updatedAt: new Date().toISOString()
-});
+function hashAction(d: AgentDecision): string {
+  return `${d.action}|${d.ref ?? ""}|${d.value ?? ""}|${d.direction ?? ""}|${d.amount ?? ""}`;
+}
 
 export class AgentRunner {
   private state: AgentState;
-  private queue: AgentTaskQueue;
   private running = false;
   private candidates: Job[];
+  private currentSnapshot: PageSnapshot | null = null;
 
   constructor(
     private readonly storage: Storage,
     private readonly tools: AgentTools,
     private readonly sourceTabId: number | null
   ) {
-    this.state = this.readState() || this.newState();
-    this.queue = new AgentTaskQueue(this.state.queue);
+    this.state = this.readState() || newAgentState(crypto.randomUUID(), sourceTabId, nowIso());
     this.candidates = this.readCandidates();
-  }
-
-  private newState(): AgentState {
-    const now = new Date().toISOString();
-    return {
-      runId: crypto.randomUUID(),
-      step: "idle",
-      sourceTabId: this.sourceTabId,
-      retryCount: 0,
-      startedAt: now,
-      updatedAt: now,
-      error: "",
-      queue: new AgentTaskQueue().snapshot(),
-      currentTaskId: null,
-      goal: "screen_jobs",
-      appliedFilters: [],
-      lastDecision: "",
-      candidateCount: 0,
-      filteredCount: 0,
-      jobsCollected: false,
-      filterCompleted: false,
-      ranked: false
-    };
   }
 
   private readState(): AgentState | null {
     try {
       const value = JSON.parse(this.storage.getItem(STORAGE_KEY) || "null") as Partial<AgentState> | null;
-      if (!value?.runId || !value.step) return null;
-      return { ...this.newState(), ...value, queue: value.queue?.length ? value.queue : new AgentTaskQueue().snapshot() };
+      if (!value?.runId) return null;
+      return { ...newAgentState(value.runId, this.sourceTabId, nowIso()), ...value };
     } catch {
       return null;
     }
-  }
-
-  private persist(): void {
-    this.state.queue = this.queue.snapshot();
-    this.storage.setItem(STORAGE_KEY, JSON.stringify(this.state));
   }
 
   private readCandidates(): Job[] {
@@ -94,23 +52,22 @@ export class AgentRunner {
     }
   }
 
+  private persist(): void {
+    this.storage.setItem(STORAGE_KEY, JSON.stringify(this.state));
+  }
+
   private persistCandidates(): void {
     this.storage.setItem(CANDIDATES_KEY, JSON.stringify(this.candidates));
   }
 
-  private async transition(step: AgentStep, message: string, ok = true): Promise<void> {
-    this.state = nextState(this.state, step, ok ? "" : message);
-    const task = this.queue.activate(step);
-    this.state.currentTaskId = task?.id || null;
-    this.persist();
-    await this.tools.setStatus({ ok, message, step, runId: this.state.runId, state: this.state, tool: step });
+  private async setStatus(ok: boolean, message: string, step?: AgentStep): Promise<void> {
+    await this.tools.setStatus({ ok, message, step: step ?? this.state.step, runId: this.state.runId, state: this.state });
   }
 
   async start(restart = false): Promise<{ ok: boolean; pending: boolean; message: string }> {
     if (this.running) return { ok: true, pending: true, message: "Agent 已在执行中" };
-    if (restart || this.state.step === "done" || this.state.step === "failed") {
-      this.state = this.newState();
-      this.queue = new AgentTaskQueue(this.state.queue);
+    if (restart || TERMINAL_STEPS.includes(this.state.step)) {
+      this.state = newAgentState(crypto.randomUUID(), this.sourceTabId, nowIso());
       this.candidates = [];
       this.persistCandidates();
     }
@@ -124,15 +81,14 @@ export class AgentRunner {
   }
 
   reset(): void {
-    this.state = this.newState();
-    this.queue = new AgentTaskQueue(this.state.queue);
+    this.state = newAgentState(crypto.randomUUID(), this.sourceTabId, nowIso());
     this.candidates = [];
     this.persist();
     this.persistCandidates();
   }
 
   async resume(): Promise<void> {
-    if (!this.state || TERMINAL_STEPS.includes(this.state.step) || this.running) return;
+    if (TERMINAL_STEPS.includes(this.state.step) || this.running) return;
     this.running = true;
     try {
       await this.run();
@@ -141,130 +97,192 @@ export class AgentRunner {
     }
   }
 
-  private async executeDecision(decision: AgentDecision): Promise<{ ok: boolean; message: string; pageMayChange?: boolean }> {
+  private async executeTurn(settings: Settings): Promise<{ pause: boolean }> {
+    const snapshot = snapshotPage();
+    this.currentSnapshot = snapshot;
+    const intent = buildAgentIntent(settings, snapshot.currentQuery);
+    const payload = buildLlmPayload({
+      state: this.state, intent, snapshot,
+      currentQuery: snapshot.currentQuery, effectiveQuery: intent.query,
+      greetContext: this.state.phase === "greet" ? { message: settings.greetMessage } : undefined
+    });
+
+    const planned = await this.tools.planAction(payload);
+    const decision = planned.decision;
+    const ctx = {
+      snapshot,
+      phase: this.state.phase,
+      greetMessage: settings.greetMessage,
+      jobsCollected: this.state.jobsCollected,
+      filterCompleted: this.state.filterCompleted,
+      ranked: this.state.ranked
+    };
+    const validation = this.tools.validateDecision(decision, ctx);
+    if (!validation.ok) {
+      const message = `决策校验失败：${validation.reason}`;
+      this.state = bumpState({ ...this.state, error: message, lastDecision: `${decision.action}: ${decision.reason}` }, nowIso());
+      this.persist();
+      await this.setStatus(false, message);
+      return { pause: false };
+    }
+
+    // 卡死检测
+    const sig = snapshot.summary;
+    const h = hashAction(decision);
+    if (h === this.state.lastActionHash && sig === this.state.lastProgressSignature) {
+      this.state.sameActionCount += 1;
+    } else {
+      this.state.sameActionCount = 0;
+    }
+    this.state.lastActionHash = h;
+    this.state.lastProgressSignature = sig;
+    if (this.state.sameActionCount >= 3) {
+      const message = "Agent 检测到重复动作且页面无进展，已暂停";
+      this.state = bumpState({ ...this.state, step: "awaiting_input", error: message, lastDecision: `${decision.action}: ${decision.reason}` }, nowIso());
+      this.persist();
+      await this.setStatus(true, message, "awaiting_input");
+      return { pause: true };
+    }
+
+    // 累计 cost 进 state（供下一轮 payload 使用）
+    this.state.tokensUsed += planned.usage.tokensIn + planned.usage.tokensOut;
+    this.state.costYuan = planned.usage.cumulativeYuan;
+
+    if (decision.action === "pause") {
+      this.state = bumpState({ ...this.state, step: "awaiting_input", error: decision.reason, lastDecision: `pause: ${decision.reason}` }, nowIso());
+      this.persist();
+      await this.setStatus(true, decision.reason, "awaiting_input");
+      return { pause: true };
+    }
+
+    if (decision.action === "request_greet_approval") {
+      // Phase B / 审批由 Task 7-8 接管；本任务只暂停并等待。
+      this.state = bumpState({ ...this.state, step: "awaiting_approval", lastDecision: `request_greet_approval: ${decision.reason}` }, nowIso());
+      this.persist();
+      await this.setStatus(true, "已请求打招呼审批，等待人工确认", "awaiting_approval");
+      return { pause: true };
+    }
+
+    let result: AgentActionResult;
+    let pageMayChange = false;
     switch (decision.action) {
       case "click":
       case "fill":
-      case "select":
       case "scroll":
-      case "next_page":
-      case "open_jobs":
-      case "apply_filters":
-        return await this.tools.executeBrowserAction(decision);
-      case "open_profile": {
-        const link = await this.tools.findProfileEntry();
-        if (!link) return { ok: false, message: "没有找到简历入口" };
-        await this.tools.navigate(link);
-        return { ok: true, message: "正在进入简历页", pageMayChange: true };
+        result = await this.tools.executeBrowserAction(decision, { phase: this.state.phase, greetMessage: settings.greetMessage, forceGreetMessage: false });
+        pageMayChange = Boolean(result.pageMayChange);
+        break;
+      case "next_page": {
+        result = await this.tools.executeBrowserAction(decision, { phase: this.state.phase, greetMessage: settings.greetMessage, forceGreetMessage: false });
+        pageMayChange = Boolean(result.pageMayChange);
+        this.state.pagesVisited += 1;
+        const sigAfter = `${location.href}|${document.querySelector<HTMLAnchorElement>("a[href*='/job_detail/'], a[href*='/job/']")?.href || ""}`;
+        if (!this.state.visitedPageSignatures.includes(sigAfter)) this.state.visitedPageSignatures.push(sigAfter);
+        break;
       }
-      case "import_profile": {
-        const result = await this.tools.importProfile();
-        return { ok: result.ok, message: result.ok ? "简历信息已读取" : result.reason || "简历读取失败" };
+      case "open_jobs": {
+        const link = await this.tools.findJobsEntry();
+        if (!link) {
+          result = { ok: false, message: "没有找到职位列表入口" };
+        } else {
+          await this.tools.navigate(link);
+          result = { ok: true, message: "正在进入职位列表页" };
+          pageMayChange = true;
+        }
+        break;
       }
       case "collect_jobs": {
-        if (!this.tools.hasJobCards()) return { ok: false, message: "当前页面没有可读取的岗位卡片" };
-        this.candidates = await this.tools.extractJobs();
-        this.state.candidateCount = this.candidates.length;
-        this.state.jobsCollected = true;
-        this.persistCandidates();
-        return { ok: true, message: `已收集 ${this.candidates.length} 个岗位` };
+        if (!this.tools.hasJobCards()) {
+          result = { ok: false, message: "当前页面没有可读取的岗位卡片" };
+        } else {
+          const visible = await this.tools.extractJobs();
+          // 合并候选池（去重 by url），不在此处翻页——翻页由 next_page 驱动。
+          const merged = new Map<string, Job>(this.candidates.map(j => [j.url, j]));
+          for (const j of visible) merged.set(j.url, j);
+          this.candidates = [...merged.values()];
+          this.state.candidateCount = this.candidates.length;
+          this.state.jobsCollected = true;
+          this.persistCandidates();
+          result = { ok: true, message: `已收集 ${visible.length} 个岗位，累计 ${this.candidates.length}` };
+        }
+        break;
       }
       case "filter_jobs": {
-        if (!this.candidates.length) return { ok: false, message: "还没有岗位候选，无法执行岗位过滤" };
-        this.candidates = await this.tools.filterJobs(this.candidates);
-        this.state.filteredCount = this.candidates.length;
-        this.state.filterCompleted = true;
-        this.persistCandidates();
-        return { ok: true, message: `过滤后剩余 ${this.candidates.length} 个岗位` };
+        if (!this.candidates.length) {
+          result = { ok: false, message: "还没有岗位候选，无法过滤" };
+        } else {
+          this.candidates = await this.tools.filterJobs(this.candidates);
+          this.state.filteredCount = this.candidates.length;
+          this.state.filterCompleted = true;
+          this.persistCandidates();
+          result = { ok: true, message: `过滤后剩余 ${this.candidates.length} 个岗位` };
+        }
+        break;
       }
       case "rank_jobs": {
-        if (!this.candidates.length) return { ok: false, message: "没有符合条件的岗位可供排序" };
-        this.candidates = await this.tools.rankJobs(this.candidates);
-        this.state.ranked = true;
-        this.persistCandidates();
-        await this.tools.saveJobs(this.candidates);
-        return { ok: true, message: `已完成 ${this.candidates.length} 个岗位的匹配排序` };
+        if (!this.candidates.length) {
+          result = { ok: false, message: "没有岗位可供排序" };
+        } else {
+          this.candidates = await this.tools.rankJobs(this.candidates);
+          this.state.ranked = true;
+          this.state.lastRankedJobs = this.candidates;
+          this.persistCandidates();
+          await this.tools.saveJobs(this.candidates);
+          result = { ok: true, message: `已完成 ${this.candidates.length} 个岗位的匹配排序` };
+        }
+        break;
       }
-      case "finish":
-        await this.tools.saveJobs(this.candidates);
-        return { ok: true, message: `Agent 已完成目标，共 ${this.candidates.length} 个岗位` };
-      case "pause":
-        return { ok: true, message: decision.reason };
+      default:
+        // Runtime actions (open_approved_job/finish) — 由 Task 7-9 接管；本任务直接暂停。
+        this.state = bumpState({ ...this.state, step: "awaiting_input", lastDecision: `${decision.action}: runtime 未接入` }, nowIso());
+        this.persist();
+        await this.setStatus(true, `${decision.action} 暂未接入，已暂停`, "awaiting_input");
+        return { pause: true };
     }
+
+    if (!result.ok) {
+      const message = result.message;
+      this.state = bumpState({ ...this.state, error: message, lastDecision: `${decision.action}: ${decision.reason}` }, nowIso());
+      this.persist();
+      await this.setStatus(false, `${message}；Agent 将重新观察并调整动作`);
+      await sleep(800);
+      return { pause: false };
+    }
+
+    this.state = bumpState({
+      ...this.state,
+      error: "",
+      phaseTurns: this.state.phaseTurns + 1,
+      lastDecision: `${decision.action}: ${decision.reason}`
+    }, nowIso());
+    this.persist();
+    await this.setStatus(true, result.message);
+
+    if (pageMayChange) {
+      setTimeout(() => void this.resume(), 1200);
+      return { pause: true };
+    }
+    await sleep(400);
+    return { pause: false };
   }
 
   private async run(): Promise<void> {
     for (let turn = 0; turn < MAX_TURNS; turn += 1) {
       try {
         const settings = await this.tools.getSettings();
-        const observation = this.tools.observePage();
-        const currentQuery = this.tools.readQueryContext();
-        const intent = buildAgentIntent(settings, currentQuery);
-        const context: AgentContext = {
-          goal: this.state.goal || "screen_jobs",
-          intent,
-          settings,
-          currentQuery,
-          profileReady: Boolean(settings.candidateProfileClean),
-          candidatesCount: this.state.candidateCount || this.candidates.length,
-          filteredCount: this.state.filteredCount,
-          ranked: this.state.ranked,
-          observation,
-          state: this.state
-        };
-        await this.transition("thinking", "Agent 正在观察页面并请求 LLM 决策…");
-        const decision = await this.tools.planAction(context);
-        this.state.lastDecision = `${decision.action}: ${decision.reason}`;
-        this.persist();
-
-        if (decision.action === "pause") {
-          await this.transition("awaiting_input", decision.reason);
-          return;
-        }
-        const step = ACTION_STEP[decision.action] || "idle";
-        await this.transition(step, `Agent 决定：${decision.reason}`);
-        const result = await this.executeDecision(decision);
-        if (!result.ok) {
-          this.state.error = result.message;
-          this.persist();
-          await this.tools.setStatus({ ok: false, message: `${result.message}；Agent 将重新观察并调整动作`, step, runId: this.state.runId, state: this.state });
-          await new Promise(resolve => setTimeout(resolve, 900));
-          continue;
-        }
-        if (!result.pageMayChange) {
-          const verification = await this.tools.verifyAction(decision, observation);
-          if (!verification.ok) {
-            this.state.error = verification.message;
-            this.persist();
-            await this.tools.setStatus({ ok: false, message: `${verification.message}；Agent 将重新规划`, step, runId: this.state.runId, state: this.state });
-            await new Promise(resolve => setTimeout(resolve, 700));
-            continue;
-          }
-          await this.transition("acting", verification.message);
-        }
-        this.state.error = "";
-        this.persist();
-        if (decision.action === "finish") {
-          await this.transition("done", result.message);
-          return;
-        }
-        await this.tools.setStatus({ ok: true, message: result.message, step, runId: this.state.runId, state: this.state, tool: decision.action });
-        if (result.pageMayChange) {
-          setTimeout(() => void this.resume(), 1500);
-          return;
-        }
-        await new Promise(resolve => setTimeout(resolve, 450));
+        const { pause } = await this.executeTurn(settings);
+        if (pause) return;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error || "Agent 执行失败");
-        this.state = nextState(this.state, "failed", message);
+        this.state = bumpState({ ...this.state, step: "failed", error: message }, nowIso());
         this.persist();
-        await this.tools.setStatus({ ok: false, message, step: "failed", runId: this.state.runId, state: this.state });
+        await this.setStatus(false, message, "failed");
         return;
       }
     }
     const message = `Agent 已达到本轮最大观察次数（${MAX_TURNS}），已暂停以避免重复操作`;
-    this.state = nextState(this.state, "awaiting_input", message);
+    this.state = bumpState({ ...this.state, step: "awaiting_input", error: message }, nowIso());
     this.persist();
-    await this.tools.setStatus({ ok: true, message, step: "awaiting_input", runId: this.state.runId, state: this.state });
+    await this.setStatus(true, message, "awaiting_input");
   }
 }

@@ -164,4 +164,22 @@ export interface BootstrapStatus {
   approval?: ApprovalRequest;
 }
 
-// AgentTools 接口在 Task 6 补全；这里先不定义，避免提前耦合。
+export interface AgentTools {
+  getSettings(): Promise<Settings>;
+  snapshot(): PageSnapshot;
+  resolveRef(ref: string): HTMLElement | null;
+  planAction(payload: Record<string, unknown>): Promise<{ decision: AgentDecision; usage: { tokensIn: number; tokensOut: number; cumulativeYuan: number; estimated: boolean } }>;
+  validateDecision(d: AgentDecision, ctx: import("./agent/validate").ValidationContext): { ok: boolean; reason: string };
+  executeBrowserAction(d: AgentDecision, ctx: { phase: AgentPhase; greetMessage: string; forceGreetMessage: boolean }): Promise<AgentActionResult>;
+  runRuntimeAction(action: RuntimeAction): Promise<AgentActionResult>;
+  isJobListPage(): boolean;
+  hasJobCards(): boolean;
+  findJobsEntry(): Promise<HTMLElement | null>;
+  navigate(element: HTMLElement): Promise<void>;
+  extractJobs(): Promise<Job[]>;
+  filterJobs(jobs: Job[]): Promise<Job[]>;
+  rankJobs(jobs: Job[]): Promise<Job[]>;
+  saveJobs(jobs: Job[]): Promise<void>;
+  setStatus(status: BootstrapStatus): Promise<void>;
+  requestApproval(request: Omit<ApprovalRequest, "id" | "createdAt" | "status">): Promise<ApprovalRequest>;
+}

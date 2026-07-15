@@ -1,4 +1,4 @@
-import type { AgentIntent, ApprovalRequest, BootstrapStatus, BossQueryContext, Job, PageObservation, Settings } from "./types";
+import type { AgentIntent, ApprovalRequest, BootstrapStatus, BossQueryContext, Job, PageSnapshot, Settings } from "./types";
 
 if (new URLSearchParams(location.search).has("embedded")) document.body.classList.add("embedded");
 let sourceTabId = Number(new URLSearchParams(location.search).get("tabId")) || null;
@@ -6,7 +6,7 @@ let dead = false;
 let autoTriggered = false;
 
 interface AgentContextSnapshot {
-  observation: PageObservation;
+  snapshot: PageSnapshot;
   currentQuery: BossQueryContext;
   intent: AgentIntent;
 }
@@ -127,12 +127,9 @@ function renderAgentContext(context: AgentContextSnapshot | null, status: Bootst
   }
   const sourceLabels: Record<AgentIntent["source"], string> = {
     user: "来自用户设置",
-    profile: "来自简历分析",
-    mixed: "来自用户设置 + 简历分析",
     page: "来自 BOSS 当前条件"
   };
-  const pageLabels: Record<PageObservation["kind"], string> = {
-    profile: "当前在简历页",
+  const pageLabels: Record<PageSnapshot["kind"], string> = {
     jobs: "当前在职位列表页",
     job_detail: "当前在职位详情页",
     login: "当前需要登录",
@@ -147,7 +144,7 @@ function renderAgentContext(context: AgentContextSnapshot | null, status: Bootst
   $("intentSource").textContent = sourceLabels[context.intent.source];
   $("intentSummary").textContent = context.intent.summary;
   $("intentSummary").className = `intent-summary${context.intent.defined ? "" : " empty"}`;
-  $("currentPage").textContent = pageLabels[context.observation.kind];
+  $("currentPage").textContent = pageLabels[context.snapshot.kind];
   $("currentQuerySummary").innerHTML = currentValues.length ? currentValues.map(value => `<span>${esc(value)}</span>`).join("") : "<span>当前页面没有已识别条件</span>";
   $("filterSummary").innerHTML = targetValues.length ? targetValues.map(value => `<span>${esc(value)}</span>`).join("") : "<span>尚未设置岗位目标</span>";
   $("lastDecision").textContent = status?.state?.lastDecision || "尚未开始观察";
@@ -183,11 +180,11 @@ function renderAgentStatus(status: BootstrapStatus | null): void {
 }
 
 function renderProgress(status: BootstrapStatus | null): void {
-  const order = ["thinking", "acting", "verifying", "awaiting_input", "done"];
-  const raw = status?.step || "idle";
-  const current = raw === "thinking" ? "thinking" : raw === "awaiting_input" ? "awaiting_input" : raw === "done" ? "done" : raw === "idle" ? "thinking" : "acting";
+  const order = ["find_jobs", "apply_filters", "extract_jobs", "filter_jobs", "rank_jobs", "awaiting_approval", "greeting", "awaiting_input", "done"];
+  const raw = String(status?.step || "idle");
+  const current = raw === "awaiting_input" ? "awaiting_input" : raw === "done" ? "done" : raw === "idle" ? "find_jobs" : order.includes(raw) ? raw : "find_jobs";
   const currentIndex = order.indexOf(current);
-  const label = current === "done" ? "已完成" : status?.ok === false ? "失败" : current === "awaiting_input" ? "等待补充岗位目标" : current === "thinking" ? "观察页面并请求 LLM 判断" : status?.message || "执行并验证页面反馈";
+  const label = current === "done" ? "已完成" : status?.ok === false ? "失败" : current === "awaiting_input" ? "等待补充岗位目标" : current === "awaiting_approval" ? "等待打招呼审批" : status?.message || "执行中";
   $("progressLabel").textContent = label;
   document.querySelectorAll<HTMLElement>("[data-agent-step]").forEach(element => {
     const step = element.dataset.agentStep || "";
