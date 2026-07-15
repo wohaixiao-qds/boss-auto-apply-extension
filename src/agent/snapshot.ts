@@ -59,8 +59,10 @@ function regionOf(el: HTMLElement): SnapshotRegion {
   if (/search|搜索/.test(`${cls} ${text}`) && el.closest(".search-condition, .search-box, [class*='search']")) return "search";
   if (el.closest(".search-condition, .job-filter, .filter-condition, [class*='filter']")) return "filter";
   if (/pager|next|下一页/.test(`${cls} ${text}`) || el.closest(".pager, [class*='pager'], [class*='next']")) return "pager";
-  if (el.closest("[class*='chat'], [class*='message-input'], [class*='communicate']")) return "chat";
-  if (el.closest(".job-card-wrapper, .job-primary, [ka='job-card'], li")) return "job";
+  // chat：排除 not-chat-router 这类含 "chat" 子串但语义为"非聊天路由"的顶部容器，避免导航被误判 chat。
+  if (el.closest("[class*='chat']:not([class*='not-chat']), [class*='message-input'], [class*='communicate'], [class*='chat-input']")) return "chat";
+  // job：用真实卡片 class（.job-card-wrap/.job-card-box），不再用裸 li（会把导航 li 误归 job）。
+  if (el.closest(".job-card-wrap, .job-card-box, .job-card-wrapper, .job-primary, [ka='job-card'], [class*='job-card'], .job-list-container, .rec-job-list")) return "job";
   return "other";
 }
 
@@ -77,12 +79,18 @@ function roleOf(el: HTMLElement): SnapshotElement["role"] {
   return "text";
 }
 
+// 真实 BOSS 的筛选 chip 未选中时文本就是标签本身（如"薪资待遇"），没有独立值子元素。
+// 标签词黑名单：取到的"值"若等于维度标签词，视为未选中，不污染 currentQuery。
+const CHIP_LABEL_WORDS = /^(薪资待遇|薪资|薪水|求职类型|工作性质|工作经验|经验|学历要求|学历|公司行业|行业|公司规模|规模|城市|地点|工作方式|薪资范围|经验要求)$/;
+
 function chipCurrent(el: HTMLElement): string | undefined {
   const dim = classifyChip(textOf(el));
   if (!dim) return undefined;
-  const inner = el.querySelector<HTMLElement>(".cur, [class*='current'], [class*='value']");
-  const val = inner ? textOf(inner) : textOf(el).replace(/^[^：:]*[：:]/, "").trim();
+  const inner = el.querySelector<HTMLElement>(".cur, [class*='current'], [class*='value'], .filter-title-value, .filter-value");
+  const full = textOf(el);
+  const val = inner ? textOf(inner) : full.replace(/^[^：:]*[：:]/, "").trim();
   if (!val || /不限|全部/.test(val)) return undefined;
+  if (val === full || CHIP_LABEL_WORDS.test(val)) return undefined; // 值=整个文本或=标签词 → 未选中
   return val;
 }
 
@@ -110,7 +118,7 @@ function deriveCurrentQuery(elements: SnapshotElement[]): BossQueryContext {
 
 export function snapshotPage(): PageSnapshot {
   resetSnapshotRefs();
-  const roots = ".search-condition, .job-filter, .filter-condition, .search-box, [class*='filter'], .job-box, [class*='chat'], .job-list, .pager, [class*='pager']";
+  const roots = ".search-condition, .job-filter, .filter-condition, .search-box, [class*='filter'], .job-box, .job-list-container, [class*='job-list'], [class*='chat']:not([class*='not-chat']), .pager, [class*='pager']";
   // 收集所有匹配的根节点（querySelector 只返回首个，会漏掉与 .job-list 同级的但落在后面的 .pager）。
   const scopes = Array.from(document.querySelectorAll<HTMLElement>(roots));
   const scopeEls = scopes.length ? scopes : [document.body];

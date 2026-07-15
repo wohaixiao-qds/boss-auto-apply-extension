@@ -60,7 +60,7 @@ function isProfilePage(): boolean {
 function isJobListPage(): boolean {
   // BOSS 的简历页通常也包含 /geek，不能把 geek 本身当成职位页。
   if (isProfilePage()) return false;
-  const hasJobCards = Boolean(document.querySelector(".job-card-wrapper, .job-primary, [ka='job-card'], [data-jobid]"));
+  const hasJobCards = Boolean(document.querySelector(".job-card-wrap, .job-card-box, .job-card-wrapper, .job-primary, [ka='job-card'], [data-jobid], [class*='job-card']"));
   const pathLooksLikeJobs = /\/jobs?(?:\.html|\/|$)|\/search(?:\/|$)|\/recommend(?:\/|$)/i.test(location.pathname);
   return hasJobCards || pathLooksLikeJobs;
 }
@@ -79,7 +79,7 @@ async function getSettings(): Promise<Settings> {
 }
 
 function cardFor(node: Element): Element {
-  return node.closest(".job-card-wrapper, .job-primary, [ka='job-card'], li") || node;
+  return node.closest(".job-card-wrap, .job-card-box, .job-card-wrapper, .job-primary, [ka='job-card'], [class*='job-card']") || node;
 }
 
 function firstText(root: Element, selectors: string[]): string {
@@ -102,7 +102,7 @@ async function findProfileEntry(): Promise<HTMLElement | null> {
 
 async function extractVisibleJobs(): Promise<Job[]> {
   const settings = await getSettings();
-  const selectors = ["a[href*='/job_detail/']", "a[href*='/job/']", ".job-card-wrapper", ".job-primary", "[ka='job-card']", "[data-jobid]"];
+  const selectors = ["a[href*='/job_detail/']", "a[href*='/job/']", ".job-card-wrap", ".job-card-box", ".job-card-wrapper", ".job-primary", "[ka='job-card']", "[data-jobid]", "[class*='job-card']"];
   const seen = new Set<Element>();
   const keywords = linesOf(settings.jobKeywords || settings.jobIntent.targetTitles.join("\n")).map(normalize);
   const locations = linesOf(settings.targetLocations || settings.jobIntent.locations.join("\n")).map(normalize);
