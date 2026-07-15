@@ -12,7 +12,8 @@ export interface ValidationContext {
 export function validateDecision(d: AgentDecision, ctx: ValidationContext): { ok: boolean; reason: string } {
   if (d.snapshotId !== ctx.snapshot.snapshotId) return { ok: false, reason: `snapshotId 不匹配（决策 ${d.snapshotId} ≠ 当前 ${ctx.snapshot.snapshotId}）` };
   if (d.action === "pause") return { ok: true, reason: "" };
-  const refEl = d.ref !== undefined ? ctx.snapshot.elements.find(e => e.id === d.ref) : undefined;
+  const refVal = d.ref;
+  const refEl = refVal !== undefined ? ctx.snapshot.elements.find(e => e.id === refVal || `e${e.id}` === refVal || e.id === refVal.replace(/^e/i, "")) : undefined;
   const needRef: boolean = ["click", "fill", "next_page"].includes(d.action);
   if (needRef) {
     if (!d.ref) return { ok: false, reason: `${d.action} 缺少 ref` };

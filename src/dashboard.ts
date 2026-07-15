@@ -76,26 +76,32 @@ async function sourceTab(): Promise<chrome.tabs.Tab | null> {
 }
 
 function renderSettings(settings: Settings): void {
-  const profile = settings.candidateProfileClean || "";
-  $("profileSummary").className = `summary${profile ? "" : " empty"}`;
-  const summary = settings.jobIntent?.summary || profile.split(/\n+/).filter(Boolean).slice(0, 3).join("；");
-  $("profileSummary").textContent = summary || "在“岗位筛选设置”里填写条件后开始筛选";
-  $("profileDetails").style.display = profile ? "block" : "none";
-  $("profileRaw").textContent = profile;
-  $("profileTime").textContent = settings.profileSyncedAt ? `已导入 ${new Date(settings.profileSyncedAt).toLocaleString()}` : "尚未导入";
-  const intent = settings.jobIntent || { targetTitles: [], skills: [], locations: [], salary: "", workModes: [], summary: "" };
-  const tags = [...intent.targetTitles, ...intent.skills.slice(0, 10), ...intent.locations, intent.salary, ...intent.workModes].filter(Boolean);
-  $("intentTags").innerHTML = tags.length ? tags.map(tag => `<span>${esc(tag)}</span>`).join("") : "<span>尚未分析</span>";
+  const splitValues = (value: string | undefined): string[] => (value || "")
+    .split(/[\n,，、]+/)
+    .map(item => item.trim())
+    .filter(Boolean);
+  const tags = [
+    ...splitValues(settings.jobKeywords),
+    ...splitValues(settings.targetLocations),
+    ...splitValues(settings.targetSalary),
+    ...splitValues(settings.jobTypes),
+    ...splitValues(settings.workExperience),
+    ...splitValues(settings.education),
+    ...splitValues(settings.companyIndustries),
+    ...splitValues(settings.companySizes),
+    ...splitValues(settings.workMode)
+  ];
+  $("intentTags").innerHTML = tags.length ? tags.map(tag => `<span>${esc(tag)}</span>`).join("") : "<span>尚未设置岗位条件</span>";
   const filters = [
-    ["关键词", settings.jobKeywords || intent.targetTitles.join("、")],
-    ["城市", settings.targetLocations || intent.locations.join("、")],
-    ["薪资", settings.targetSalary || intent.salary],
+    ["关键词", settings.jobKeywords],
+    ["城市", settings.targetLocations],
+    ["薪资", settings.targetSalary],
     ["求职类型", settings.jobTypes],
     ["经验", settings.workExperience],
     ["学历", settings.education],
     ["行业", settings.companyIndustries],
     ["规模", settings.companySizes],
-    ["工作方式", settings.workMode || intent.workModes.join("、")],
+    ["工作方式", settings.workMode],
     ["最低分", settings.minMatchScore]
   ].filter(([, value]) => Boolean(value));
   $("filterSummary").innerHTML = filters.length ? filters.map(([label, value]) => `<span>${esc(label)}：${esc(value)}</span>`).join("") : "<span>尚未设置，点击“岗位筛选设置”</span>";
@@ -104,7 +110,7 @@ function renderSettings(settings: Settings): void {
   $("aiStatus").textContent = aiReady ? `已连接 · ${settings.aiModel || "gpt-4o-mini"}` : "未配置 LLM，无法启动";
   $("aiStatus").className = aiReady ? "connected" : "offline";
   $("aiDetails").textContent = aiReady
-    ? `模型：${settings.aiModel || "gpt-4o-mini"} · 用于页面观察、筛选与打招呼决策`
+    ? `模型：${settings.aiModel || "gpt-4o-mini"} · 用于页面观察、动作规划与岗位匹配`
     : "请在设置中配置 API Base URL、模型和 API Key；无 LLM 时 Agent 无法运行。";
 }
 
@@ -288,8 +294,8 @@ async function scan(): Promise<void> {
   const tab = await sourceTab();
   if (!tab?.id || !/zhipin\.com/.test(tab.url || "")) { setNotice("请先打开 BOSS 职位列表页", true); return; }
   if (/\/resume|\/profile|\/personal|\/account/i.test(tab.url || "")) {
-    setNotice("当前在简历页，正在打开职位列表并开始筛选…");
-    await runtimeMessage({ type: "SET_BOOTSTRAP_STATUS", status: { ok: true, message: "正在从简历页转到职位列表…", step: "find_jobs" } });
+    setNotice("当前不在职位列表页，正在打开职位列表并开始筛选…");
+    await runtimeMessage({ type: "SET_BOOTSTRAP_STATUS", status: { ok: true, message: "正在转到职位列表…", step: "find_jobs" } });
     const result = await tabsMessage<{ ok: boolean; message?: string; reason?: string }>(tab.id, { type: "AUTOMATE_BOOTSTRAP", restart: true });
     if (!result?.ok) setNotice(result?.reason || "无法打开职位列表页", true);
     return;
@@ -305,7 +311,7 @@ $("stopAgent").addEventListener("click", async () => {
   setNotice("已请求停止 Agent，下一轮开头生效");
 });
 $("clearData").addEventListener("click", async () => {
-  if (!confirm("重置本次 Agent 任务和已导入结果？岗位筛选设置和模型配置会保留。")) return;
+  if (!confirm("重置本次 Agent 任务和已筛选结果？岗位筛选设置和模型配置会保留。")) return;
   await runtimeMessage({ type: "CLEAR_IMPORTED_DATA" });
   const tab = await sourceTab();
   if (tab?.id) await tabsMessage(tab.id, { type: "RESET_AGENT" });

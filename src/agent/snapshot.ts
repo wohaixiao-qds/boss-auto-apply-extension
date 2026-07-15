@@ -174,8 +174,12 @@ export function snapshotPage(): PageSnapshot {
   };
 }
 
+// id 体系容错：序列化给 LLM 看的是 [e0]，LLM 会回 ref="e0"；
+// 但 snapshotRefs 的 key 是纯数字 "0"。这里统一去掉前缀，两种写法都能命中。
+const refKey = (ref: string): string => ref.replace(/^e/i, "");
+
 export function resolveRef(ref: string): HTMLElement | null {
-  const el = snapshotRefs.get(ref);
+  const el = snapshotRefs.get(refKey(ref));
   if (!el || !document.contains(el)) return null;
   return el;
 }
