@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- 目标 ES2022；`strict: true`；`npm run build` = `tsc --noEmit && node scripts/build.mjs`，每个任务结束必须 `npm run build` 绿。
+- 目标 ES2022；`strict: true`；`npm run build` = `tsc --noEmit && node scripts/build.mjs`。每个任务结束的门禁见下方"迁移期构建门禁"。
 - 不新增 manifest 权限（继续用 storage/activeTab/tabs/sidePanel + 现有 host）。
 - 所有 LLM 动作执行前必须过 `validateDecision()`；LLM 不得发 `finish`/`open_approved_job`；停止靠 `stopRequested` 标志不是动作。
 - 招呼消息：Phase B 所有 fill 的 value 由 Runtime 强制覆盖为 `settings.greetMessage`，且 ref.region 必须为 `chat`。
@@ -18,6 +18,8 @@
 - 双存储：业务态 sessionStorage，`phase/approvedForGreet/greeted/currentGreetIndex/runId/stateVersion/updatedAt` 镜像 chrome.storage.local，恢复时以 chrome.storage 且 `updatedAt` 最新者为准。
 - 域名约束：导航/打开岗位仅限 zhipin 域。
 - 测试：纯逻辑用 vitest 单测；DOM 行为用 jsdom fixture；BOSS 真实页面行为用人工验证清单（见 Task 11）。
+- **迁移期构建门禁（pre-flight 调整）**：Task 1 重写 `types.ts` 会破坏现有消费方（旧类型名/旧 action），直到 Task 6 才迁移完。因此 **Tasks 1–5 的门禁 = 本任务 vitest 测试通过**（vitest 经 esbuild 转译不做类型检查，可独立绿）；`npm run build`（含 `tsc --noEmit`）**从 Task 6 起恢复为门禁**（旧类型消费方届时全部迁移完，全量 tsc 转绿）。
+- **git 基建已由控制器完成**：仓库已 `git init`，baseline 提交在 `main`，工作分支 `feat/llm-driven-agent`。各任务在该分支上提交，无需再 `git init`。
 
 ---
 
@@ -58,12 +60,12 @@
 **Interfaces:**
 - Produces: `PageSnapshot`、`SnapshotElement`、`AgentDecision`（含 `snapshotId`/`ref`）、`AgentState`（含所有新字段）、`GreetStatus`、`GreetContext`、`AgentAction`（LLM actions + Runtime-only）、`ApprovalRequest.jobs`、`Settings` 新字段、`newAgentState()` 工厂
 
-- [ ] **Step 1: git init（项目当前非 git 仓库）**
+- [ ] **Step 1: 确认 git 基建（控制器已完成）**
 
+仓库已在分支 `feat/llm-driven-agent`（baseline 提交已落在 `main`）。无需 `git init`；本任务在该分支继续提交。验证：
 ```bash
-cd /Users/zhangyu/CodeDevelopment/boss-auto-apply-extension
-git init && printf 'node_modules/\ndist/\n' > .gitignore
-git add -A && git commit -m "chore: snapshot before llm-agent refactor"
+git branch --show-current   # 应为 feat/llm-driven-agent
+git log --oneline -1        # 应见 baseline 提交
 ```
 
 - [ ] **Step 2: 加测试依赖与脚本**
@@ -366,10 +368,12 @@ describe("newAgentState", () => {
 Run: `npx vitest run tests/agent/state.test.ts`
 Expected: 第一次因路径/类型可能需先 `npm run typecheck`；修复后 PASS 2 条。
 
-- [ ] **Step 7: build + commit**
+- [ ] **Step 7: 测试 + commit（迁移期：只要求 vitest 绿，不要求 tsc）**
+
+Run: `npx vitest run`
+Expected: state.test.ts 2 条 PASS。（注：`npm run build` 此刻会因旧消费方报类型错——属预期，Task 6 起恢复为门禁。）
 
 ```bash
-npm run build
 git add -A && git commit -m "feat(agent): test harness + v5 types and AgentState factory"
 ```
 
@@ -700,7 +704,6 @@ export function costBreakerTripped(costYuan: number, settings: Settings): boolea
 
 ```bash
 npx vitest run
-npm run build
 git add -A && git commit -m "feat(agent): pure logic — intent(query-only), chip classifier, serializer, cost"
 ```
 
@@ -891,7 +894,7 @@ export function resolveRef(ref: string): HTMLElement | null {
 - [ ] **Step 5: build + commit**
 
 ```bash
-npm run build
+npx vitest run
 git add -A && git commit -m "feat(agent): snapshotPage with region budget, chip-derived currentQuery, resolveRef"
 ```
 
@@ -1086,7 +1089,7 @@ export function effectiveQuerySatisfied(effective: BossQueryContext, current: Bo
 - [ ] **Step 5: build + commit**
 
 ```bash
-npm run build
+npx vitest run
 git add -A && git commit -m "feat(agent): Runtime validation matrix + selectedUrls + effectiveQuery check"
 ```
 
@@ -1095,18 +1098,21 @@ git add -A && git commit -m "feat(agent): Runtime validation matrix + selectedUr
 ## Task 5: executeBrowserAction（单 ref + 跨域 + 收集/翻页解耦）
 
 **Files:**
-- Modify: `src/content.ts`（重写 `executeBrowserAction`；`collect_jobs` 去翻页循环；删 `chooseFilter`/`applyConfiguredFilter`/`applyMergedFilter`/`readCurrentFilterValue`/`readBossQueryContext` 中硬编码标签用法；删 `applyFilters`）
-- Test: `tests/content/execute-action.test.ts`（jsdom 验证 click/fill/跨域拦截；分页与翻页签名留 Task 11 人工）
+- Create: `src/agent/browser-action.ts`（**纯新增**，本任务不碰 `content.ts`/`workflow.ts`）
+- Test: `tests/content/execute-action.test.ts`（jsdom 验证 click/fill/跨域拦截）
+
+> **pre-flight 调整**：原计划在本任务删除 `chooseFilter` 全家桶并改 `content.ts`，但那些代码仍被当前 `workflow.ts`/`content.ts` 引用，删了会破坏 Task 6 之前的构建。因此本任务**只新增 `browser-action.ts` 模块 + 测试**；旧代码的删除与 `content.ts`/`workflow.ts` 的重新接线统一在 **Task 6 的大切换**里完成（届时一次性保持 tsc 绿）。
 
 **Interfaces:**
-- Produces: `executeBrowserAction(decision, ctx)->Promise<AgentActionResult>`，其中 ctx 含 `greetMessage`、`phase`、`forceGreetMessage:boolean`；`collectVisibleJobs()` 只抽当前页。
+- Consumes: `resolveRef`（Task 3）、`AgentDecision`/`AgentActionResult`/`AgentPhase`（Task 1）
+- Produces: `executeBrowserAction(decision, ctx)->Promise<AgentActionResult>`，`BrowserActionContext = { phase: AgentPhase; greetMessage: string; forceGreetMessage: boolean }`
 
 - [ ] **Step 1: 失败测试**
 
 Create `tests/content/execute-action.test.ts`:
 ```ts
 import { describe, it, expect, beforeEach } from "vitest";
-import { executeBrowserAction } from "../../src/content";
+import { executeBrowserAction } from "../../src/agent/browser-action";
 import type { AgentDecision } from "../../src/types";
 
 beforeEach(() => {
@@ -1158,9 +1164,9 @@ describe("executeBrowserAction", () => {
 });
 ```
 
-> 注：`executeBrowserAction` 需要从 `src/content.ts` 具名导出。当前它是内部函数；本任务改为 `export async function executeBrowserAction(...)`。`content.ts` 是浏览器入口（含 `chrome.runtime` 副作用），测试里只 import 这个函数；为避免顶层 `chrome` 副作用，把 `executeBrowserAction` 抽到 `src/agent/browser-action.ts` 更干净——**采用此拆分**（见 Step 2）。
+> 本任务**只新增** `src/agent/browser-action.ts`（Step 2）+ 测试，不修改 `content.ts`/`workflow.ts`。`content.ts` 的旧 `executeBrowserAction`/`chooseFilter` 全家桶删除与重新接线在 Task 6 完成。
 
-- [ ] **Step 2: 抽 `src/agent/browser-action.ts`，先实现让测试通过**
+- [ ] **Step 2: 实现 `src/agent/browser-action.ts` 让测试通过**
 
 Create `src/agent/browser-action.ts`:
 ```ts
@@ -1218,21 +1224,14 @@ export async function executeBrowserAction(d: AgentDecision, ctx: BrowserActionC
 }
 ```
 
-- [ ] **Step 3: content.ts 调用新模块**
+- [ ] **Step 3: 跑测试通过**
 
-在 `src/content.ts` 顶部 `import { executeBrowserAction } from "./agent/browser-action";`；删除旧的 `executeBrowserAction` 本地实现与 `chooseFilter`/`applyConfiguredFilter`/`applyMergedFilter`/`applyFilters`/`readCurrentFilterValue`（保留 `findNextPage`、`pageSignature`、`extractVisibleJobs` 给 collect/next_page 用）。`readBossQueryContext` 改为薄封装 `snapshotPage().currentQuery`（或直接由 workflow 用 snapshot，删除该函数）。
-
-> `next_page` 与 `collect_jobs` 的执行在 `workflow.ts`（Task 6）编排；本任务只确保 browser-action 原语可用、`collect_jobs` 调 `extractVisibleJobs()` 不翻页。`extractVisibleJobs` 保持现状（单页抽取）。
-
-- [ ] **Step 4: 把测试 import 改为新模块并跑通过**
-
-把 `tests/content/execute-action.test.ts` 的 import 改为 `from "../../src/agent/browser-action"`，调用签名不变。
 Run: `npx vitest run tests/content/execute-action.test.ts` → PASS 3 条。
+（迁移期：`npm run build` 会因旧消费方红，属预期；Task 6 起恢复 build 门禁。）
 
-- [ ] **Step 5: build + commit**
+- [ ] **Step 4: commit**
 
 ```bash
-npm run build
 git add -A && git commit -m "feat(agent): single-ref browser actions (click/fill/scroll) + cross-domain block + greetMessage force"
 ```
 
@@ -1243,8 +1242,11 @@ git add -A && git commit -m "feat(agent): single-ref browser actions (click/fill
 **Files:**
 - Modify: `src/agent/workflow.ts`（重写 `run()`、删 profile 分支、接入 snapshot/validate/executeBrowserAction）
 - Modify: `src/background.ts`（`planAgentAction` 载荷/prompt 改；累计 cost；删 ANALYZE_PROFILE 路径）
+- Modify: `src/content.ts`（**从 Task 5 接过来的清理**：删旧本地 `executeBrowserAction`/`chooseFilter`/`applyConfiguredFilter`/`applyMergedFilter`/`applyFilters`/`readCurrentFilterValue`/`readBossQueryContext` 的硬编码标签用法；`tools` 对象改为用新 `browser-action` + `snapshot`；`collect_jobs` 调 `extractVisibleJobs()` 不翻页；保留 `findNextPage`/`pageSignature`/`extractVisibleJobs`/`filterJobs`/`rankJobs`）
 - Delete: `src/agent/planner.ts`；删 `src/agent/tool-registry.ts`（如不再用）
 - Test: `tests/agent/payload.test.ts`（载荷结构 + prompt 关键约束）；Phase A 循环用 Task 11 人工验证
+
+> **本任务是迁移收口点**：Task 1–5 期间因类型/接口变更而暂时 red 的 `npm run build`，必须在本任务结束后恢复为绿（全量 `tsc --noEmit` 通过）。这是 Task 6 的硬门禁。
 
 **Interfaces:**
 - Produces: workflow 的 `AgentTools` 形状更新；`buildLlmPayload(state, intent, snapshot, greetContext?, usage?)` 纯函数（便于单测）

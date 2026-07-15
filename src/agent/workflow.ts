@@ -1,88 +1,49 @@
 import { buildAgentIntent } from "./intent";
-import type { AgentAction, AgentContext, AgentDecision, AgentState, AgentStep, AgentTools, BootstrapStatus, Job } from "../types";
-import { AgentTaskQueue } from "./task-queue";
+import { newAgentState, bumpState } from "./state";
+import { snapshotPage } from "./snapshot";
+import { validateDecision, effectiveQuerySatisfied, validateSelectedUrls } from "./validate";
+import { executeBrowserAction } from "./browser-action";
+import { buildLlmPayload } from "./payload";
+import { mergeRecovery } from "./recovery";
+import { nextGreetStatus, greetVerify } from "./greet";
+import { shouldBreak, recordAction } from "./guardrails";
+import type { AgentActionResult, AgentDecision, AgentState, AgentStep, AgentTools, Job, PageSnapshot, Settings } from "../types";
 
 const STORAGE_KEY = "boss-agent-state";
 const CANDIDATES_KEY = "boss-agent-candidates";
 const TERMINAL_STEPS: AgentStep[] = ["done", "failed"];
-const MAX_TURNS = 40;
+const MAX_TURNS = 50;
 
-const ACTION_STEP: Partial<Record<AgentAction, AgentStep>> = {
-  click: "apply_filters",
-  fill: "apply_filters",
-  select: "apply_filters",
-  scroll: "extract_jobs",
-  next_page: "extract_jobs",
-  open_profile: "find_profile",
-  import_profile: "analyze_profile",
-  open_jobs: "find_jobs",
-  apply_filters: "apply_filters",
-  collect_jobs: "extract_jobs",
-  filter_jobs: "filter_jobs",
-  rank_jobs: "rank_jobs",
-  finish: "done",
-  pause: "awaiting_input"
-};
+const nowIso = (): string => new Date().toISOString();
+const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
 
-const nextState = (state: AgentState, step: AgentStep, error = ""): AgentState => ({
-  ...state,
-  step,
-  error,
-  updatedAt: new Date().toISOString()
-});
+function hashAction(d: AgentDecision): string {
+  return `${d.action}|${d.ref ?? ""}|${d.value ?? ""}|${d.direction ?? ""}|${d.amount ?? ""}`;
+}
 
 export class AgentRunner {
   private state: AgentState;
-  private queue: AgentTaskQueue;
   private running = false;
   private candidates: Job[];
+  private currentSnapshot: PageSnapshot | null = null;
 
   constructor(
     private readonly storage: Storage,
     private readonly tools: AgentTools,
     private readonly sourceTabId: number | null
   ) {
-    this.state = this.readState() || this.newState();
-    this.queue = new AgentTaskQueue(this.state.queue);
+    this.state = this.readState() || newAgentState(crypto.randomUUID(), sourceTabId, nowIso());
     this.candidates = this.readCandidates();
-  }
-
-  private newState(): AgentState {
-    const now = new Date().toISOString();
-    return {
-      runId: crypto.randomUUID(),
-      step: "idle",
-      sourceTabId: this.sourceTabId,
-      retryCount: 0,
-      startedAt: now,
-      updatedAt: now,
-      error: "",
-      queue: new AgentTaskQueue().snapshot(),
-      currentTaskId: null,
-      goal: "screen_jobs",
-      appliedFilters: [],
-      lastDecision: "",
-      candidateCount: 0,
-      filteredCount: 0,
-      jobsCollected: false,
-      filterCompleted: false,
-      ranked: false
-    };
   }
 
   private readState(): AgentState | null {
     try {
       const value = JSON.parse(this.storage.getItem(STORAGE_KEY) || "null") as Partial<AgentState> | null;
-      if (!value?.runId || !value.step) return null;
-      return { ...this.newState(), ...value, queue: value.queue?.length ? value.queue : new AgentTaskQueue().snapshot() };
+      if (!value?.runId) return null;
+      return { ...newAgentState(value.runId, this.sourceTabId, nowIso()), ...value };
     } catch {
       return null;
     }
-  }
-
-  private persist(): void {
-    this.state.queue = this.queue.snapshot();
-    this.storage.setItem(STORAGE_KEY, JSON.stringify(this.state));
   }
 
   private readCandidates(): Job[] {
@@ -94,28 +55,63 @@ export class AgentRunner {
     }
   }
 
+  private persist(): void {
+    this.storage.setItem(STORAGE_KEY, JSON.stringify(this.state));
+  }
+
+  private async persistRecovery(): Promise<void> {
+    if (!this.tools.setAgentRecovery) return;
+    try {
+      await this.tools.setAgentRecovery({
+        runId: this.state.runId,
+        stateVersion: this.state.stateVersion,
+        updatedAt: this.state.updatedAt,
+        phase: this.state.phase,
+        approvedForGreet: this.state.approvedForGreet,
+        greeted: this.state.greeted,
+        currentGreetIndex: this.state.currentGreetIndex
+      });
+    } catch {
+      // 恢复镜像写入失败不应阻断主流程。
+    }
+  }
+
+  private async loadRecovery(): Promise<void> {
+    if (!this.tools.getAgentRecovery) return;
+    try {
+      const remote = await this.tools.getAgentRecovery();
+      if (!remote) return;
+      // 镜像是 AgentState 的子集；叠加到本地状态上以形成完整 AgentState 供 mergeRecovery 比较。
+      const remoteState: AgentState = { ...this.state, ...remote };
+      const merged = mergeRecovery(this.state, remoteState);
+      if (merged === remoteState) {
+        this.state = merged;
+        this.persist();
+      }
+    } catch {
+      // 恢复读取失败不应阻断主流程。
+    }
+  }
+
   private persistCandidates(): void {
     this.storage.setItem(CANDIDATES_KEY, JSON.stringify(this.candidates));
   }
 
-  private async transition(step: AgentStep, message: string, ok = true): Promise<void> {
-    this.state = nextState(this.state, step, ok ? "" : message);
-    const task = this.queue.activate(step);
-    this.state.currentTaskId = task?.id || null;
-    this.persist();
-    await this.tools.setStatus({ ok, message, step, runId: this.state.runId, state: this.state, tool: step });
+  private async setStatus(ok: boolean, message: string, step?: AgentStep): Promise<void> {
+    await this.tools.setStatus({ ok, message, step: step ?? this.state.step, runId: this.state.runId, state: this.state });
   }
 
   async start(restart = false): Promise<{ ok: boolean; pending: boolean; message: string }> {
     if (this.running) return { ok: true, pending: true, message: "Agent 已在执行中" };
-    if (restart || this.state.step === "done" || this.state.step === "failed") {
-      this.state = this.newState();
-      this.queue = new AgentTaskQueue(this.state.queue);
+    if (restart || TERMINAL_STEPS.includes(this.state.step)) {
+      this.state = newAgentState(crypto.randomUUID(), this.sourceTabId, nowIso());
       this.candidates = [];
       this.persistCandidates();
     }
     this.running = true;
     try {
+      // 若从已恢复的 greet 状态继续（非 restart），同样先校验 approvedForGreet（幂等）。
+      if (!restart && this.state.phase === "greet") await this.validateApprovedForGreet();
       await this.run();
     } finally {
       this.running = false;
@@ -124,15 +120,18 @@ export class AgentRunner {
   }
 
   reset(): void {
-    this.state = this.newState();
-    this.queue = new AgentTaskQueue(this.state.queue);
+    this.state = newAgentState(crypto.randomUUID(), this.sourceTabId, nowIso());
     this.candidates = [];
     this.persist();
     this.persistCandidates();
   }
 
   async resume(): Promise<void> {
-    if (!this.state || TERMINAL_STEPS.includes(this.state.step) || this.running) return;
+    if (TERMINAL_STEPS.includes(this.state.step) || this.running) return;
+    // 从 chrome.storage.local 镜像合并恢复数据（审批通过后由 background 写入）。
+    await this.loadRecovery();
+    // Carry-forward（Task 7→8）：审批通过的列表到达后，先过 validateSelectedUrls 再进入打招呼循环。
+    await this.validateApprovedForGreet();
     this.running = true;
     try {
       await this.run();
@@ -141,130 +140,457 @@ export class AgentRunner {
     }
   }
 
-  private async executeDecision(decision: AgentDecision): Promise<{ ok: boolean; message: string; pageMayChange?: boolean }> {
+  /**
+   * 人工裁决未知打招呼结果（RESOLVE_UNKNOWN_GREET）。
+   * sent → verified（并入 greeted，去重）；skipped → failed。随后推进到下一岗位。
+   */
+  resolveUnknownGreet(url: string, verdict: "sent" | "skipped"): void {
+    const status = verdict === "sent" ? "verified" : "failed";
+    this.state.greetStatus = { ...this.state.greetStatus, [url]: status };
+    if (status === "verified" && !this.state.greeted.includes(url)) {
+      this.state.greeted = [...this.state.greeted, url];
+    }
+    if (this.state.currentGreetUrl === url) this.state.currentGreetUrl = "";
+    if (this.state.approvedForGreet[this.state.currentGreetIndex] === url) {
+      this.state.currentGreetIndex += 1;
+    }
+    this.state = bumpState({ ...this.state, lastDecision: `resolve_unknown_greet: ${url} → ${status}` }, nowIso());
+    this.persist();
+  }
+
+  /**
+   * Carry-forward：审批通过的 approvedForGreet 到达后，过滤掉非 zhipin/未排序/排除公司/超 cap 的 URL。
+   * 仅在刚进入 Phase B、尚未开始推进时执行一次（幂等：对已校验列表再跑结果不变）。
+   */
+  private async validateApprovedForGreet(): Promise<void> {
+    if (this.state.phase !== "greet") return;
+    if (!this.state.approvedForGreet.length) return;
+    if (this.state.currentGreetIndex !== 0 || this.state.greeted.length > 0) return;
+    const settings = await this.tools.getSettings();
+    // 进入 Phase B 时用 Settings.greetCap 覆盖默认值（newAgentState 硬编码为 10）。
+    this.state.greetCap = Number(settings.greetCap) || 10;
+    const { valid, rejected } = validateSelectedUrls(this.state.approvedForGreet, this.state.lastRankedJobs, settings);
+    if (rejected.length) {
+      this.state = bumpState({ ...this.state, approvedForGreet: valid, error: rejected.length ? `已拒绝未通过校验的 URL：${rejected.join("; ")}` : this.state.error }, nowIso());
+    } else {
+      this.state.approvedForGreet = valid;
+    }
+    this.persist();
+  }
+
+  /**
+   * Phase B Runtime 编排：终态判定、岗位指针推进、自动打开下一岗位。
+   * 返回 handled=true 表示本轮由 Runtime 处理（调用方应直接返回 pause）；handled=false 表示交给 LLM 单步。
+   */
+  private async runPhaseBRuntime(_settings: Settings): Promise<{ handled: boolean; pause: boolean }> {
+    const approved = this.state.approvedForGreet;
+
+    // 终态：达到 greetCap 或已遍历完批准列表 → finish。
+    if (this.state.greeted.length >= this.state.greetCap || this.state.currentGreetIndex >= approved.length) {
+      await this.finishGreet();
+      return { handled: true, pause: true };
+    }
+
+    const url = approved[this.state.currentGreetIndex];
+    if (!url) {
+      await this.finishGreet();
+      return { handled: true, pause: true };
+    }
+    const status = this.state.greetStatus[url] ?? "pending";
+
+    // 双重判重防护：当前 url 已是终态（verified/failed）或已记入 greeted[]，
+    // 直接推进指针，不落入 LLM 单步（避免对已打招呼的 URL 二次打招呼）。
+    if (status === "verified" || status === "failed" || this.state.greeted.includes(url)) {
+      this.state.currentGreetIndex += 1;
+      this.state.currentGreetUrl = "";
+      this.state = bumpState({ ...this.state, lastDecision: `skip already-greeted: ${url}（${status}）` }, nowIso());
+      this.persist();
+      await this.persistRecovery();
+      return { handled: true, pause: false };
+    }
+
+    // 当前岗位尚未打开 → Runtime 自动导航打开。
+    if (status === "pending") {
+      return await this.openApprovedJob(url);
+    }
+
+    // opening/message_filled → 交给 LLM 单步（fall through）。
+    // verified/unknown/failed 为终态：verified/failed 应已在产生时推进 index；unknown 暂停等待人工。
+    if (status === "unknown") {
+      const message = `岗位 ${url} 打招呼结果不明确，等待人工裁决`;
+      if (this.state.step !== "awaiting_input") {
+        this.state = bumpState({ ...this.state, step: "awaiting_input", error: message, lastDecision: "unknown: 等待 RESOLVE_UNKNOWN_GREET" }, nowIso());
+        this.persist();
+        await this.persistRecovery();
+        await this.setStatus(true, message, "awaiting_input");
+      }
+      return { handled: true, pause: true };
+    }
+
+    return { handled: false, pause: false };
+  }
+
+  /** Runtime 打开已批准岗位：域名校验 → 导航 → 置 opening → 交 LLM。 */
+  private async openApprovedJob(url: string): Promise<{ handled: boolean; pause: boolean }> {
+    let parsed: URL;
+    try { parsed = new URL(url); } catch {
+      return await this.failCurrentJob(url, "无效的岗位 URL");
+    }
+    if (!/(^|\.)zhipin\.com$/i.test(parsed.hostname)) {
+      return await this.failCurrentJob(url, "非 zhipin 域");
+    }
+    try {
+      if (this.tools.navigateToUrl) {
+        await this.tools.navigateToUrl(url);
+      } else {
+        // 兜底：同源直接跳转（zhipin 内）。
+        location.href = url;
+      }
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return await this.failCurrentJob(url, `导航失败：${reason}`);
+    }
+    // 成功导航 → pending→opened→opening；页面将重载，新页面的 content 会 resume 继续 LLM 单步。
+    this.state.currentGreetUrl = url;
+    this.state.greetStatus = { ...this.state.greetStatus, [url]: nextGreetStatus("pending", "opened") };
+    this.state = bumpState({ ...this.state, error: "", lastDecision: `open_approved_job: ${url}` }, nowIso());
+    this.persist();
+    await this.persistRecovery();
+    await this.setStatus(true, `已打开岗位 ${url}，进入沟通`, "greeting");
+    // 导航会销毁当前 content 上下文；交由新页面 resume，这里暂停。
+    return { handled: true, pause: true };
+  }
+
+  /** 当前岗位标记失败、推进指针、自动进入下一岗（下一轮 Runtime 处理）。 */
+  private async failCurrentJob(url: string, reason: string): Promise<{ handled: boolean; pause: boolean }> {
+    this.state.greetStatus = { ...this.state.greetStatus, [url]: "failed" };
+    this.state.currentGreetIndex += 1;
+    this.state.currentGreetUrl = "";
+    this.state = bumpState({ ...this.state, error: reason, lastDecision: `open_approved_job 失败：${reason}` }, nowIso());
+    this.persist();
+    await this.persistRecovery();
+    await this.setStatus(false, `${reason}；跳过 ${url}`);
+    await sleep(400);
+    return { handled: true, pause: false };
+  }
+
+  /** Phase B 完成。区分“被拒绝（进入 greet 时批准列表为空）”与“正常完成”。 */
+  private async finishGreet(): Promise<void> {
+    const greeted = this.state.greeted.length;
+    const total = this.state.approvedForGreet.length;
+    // 拒绝路径：进入打招呼阶段时批准列表就是空（用户在审批清单点了“拒绝”）。
+    // spec §6：拒绝=终止本次任务，不 greet；报“已拒绝”而非“完成 0/N”。
+    if (total === 0) {
+      const message = "已拒绝审批，未发送任何招呼";
+      this.state = bumpState({ ...this.state, phase: "greet", step: "done", error: "", lastDecision: "finish: rejected, no greet", currentGreetUrl: "" }, nowIso());
+      this.persist();
+      await this.persistRecovery();
+      await this.setStatus(true, message, "done");
+      return;
+    }
+    const message = `打招呼阶段完成：已打招呼 ${greeted}/${Math.min(total, this.state.greetCap)}`;
+    this.state = bumpState({ ...this.state, phase: "greet", step: "done", error: "", lastDecision: "finish: greet done", currentGreetUrl: "" }, nowIso());
+    this.persist();
+    await this.persistRecovery();
+    await this.setStatus(true, message, "done");
+  }
+
+  /**
+   * Phase B 状态机推进：根据刚执行的 LLM 动作派生 GreetEvent 并推进 greetStatus[currentGreetUrl]。
+   * 派生规则：
+   *   - fill 命中 chat 区 → "filled"（opening→message_filled）
+   *   - click 命中 @chat-send（chat 区且文本匹配 发送/send）→ "send_clicked"（message_filled→sent），
+   *     随即重快照跑 greetVerify：verify_clear→verified / verify_unclear→unknown / failed→failed
+   * 终态处理：verified/failed→推进 index 自动下一岗；unknown→暂停等待 RESOLVE_UNKNOWN_GREET。
+   * 返回 {pause} 表示已产生终态、调用方应据此返回；返回 null 表示非 greet 关键动作、继续默认节奏。
+   */
+  private async advanceGreetFsm(decision: AgentDecision, snapshotBefore: PageSnapshot): Promise<{ pause: boolean } | null> {
+    const url = this.state.currentGreetUrl;
+    if (!url) return null;
+    const cur = this.state.greetStatus[url] ?? "pending";
+    const refEl = decision.ref !== undefined ? snapshotBefore.elements.find(e => e.id === decision.ref) : undefined;
+
+    let event: import("./greet").GreetEvent | null = null;
+    if (decision.action === "fill" && refEl?.region === "chat") event = "filled";
+    else if (decision.action === "click" && refEl?.region === "chat" && /发送|send/i.test(refEl.text)) event = "send_clicked";
+
+    if (!event) return null; // 非关键动作（如点击“立即沟通”、滚动）不推进 FSM
+
+    let next = nextGreetStatus(cur, event);
+    this.state.greetStatus = { ...this.state.greetStatus, [url]: next };
+
+    // send_clicked → 立即重快照验证
+    if (event === "send_clicked" && next === "sent") {
+      await sleep(500);
+      const after = snapshotPage();
+      this.currentSnapshot = after;
+      const verify = greetVerify(after);
+      next = nextGreetStatus("sent", verify === "verified" ? "verify_clear" : verify === "failed" ? "failed" : "verify_unclear");
+      this.state.greetStatus = { ...this.state.greetStatus, [url]: next };
+    }
+
+    if (next === "verified") {
+      if (!this.state.greeted.includes(url)) this.state.greeted = [...this.state.greeted, url];
+      this.state.currentGreetIndex += 1;
+      this.state.currentGreetUrl = "";
+      this.state = bumpState({ ...this.state, error: "", lastDecision: `greet verified: ${url}；自动进入下一岗` }, nowIso());
+      this.persist();
+      await this.persistRecovery();
+      await this.setStatus(true, `已打招呼：${url}，继续下一岗位`, "greeting");
+      await sleep(300);
+      return { pause: false }; // 下一轮 runPhaseBRuntime 自动打开下一岗
+    }
+    if (next === "failed") {
+      this.state.currentGreetIndex += 1;
+      this.state.currentGreetUrl = "";
+      this.state = bumpState({ ...this.state, error: `岗位 ${url} 打招呼失败`, lastDecision: `greet failed: ${url}；跳过` }, nowIso());
+      this.persist();
+      await this.persistRecovery();
+      await this.setStatus(false, `岗位 ${url} 打招呼失败，跳过`);
+      await sleep(300);
+      return { pause: false };
+    }
+    if (next === "unknown") {
+      const message = `岗位 ${url} 打招呼结果不明确，等待人工裁决`;
+      this.state = bumpState({ ...this.state, step: "awaiting_input", error: message, lastDecision: "unknown: 等待 RESOLVE_UNKNOWN_GREET" }, nowIso());
+      this.persist();
+      await this.persistRecovery();
+      await this.setStatus(true, message, "awaiting_input");
+      return { pause: true };
+    }
+
+    // opening/message_filled/sent（未到终态）→ 正常节奏，交下一轮 LLM。
+    this.state = bumpState(this.state, nowIso());
+    this.persist();
+    await sleep(300);
+    return null;
+  }
+
+  private async executeTurn(settings: Settings): Promise<{ pause: boolean }> {
+    // Phase B（greet）由 Runtime 驱动岗位指针；LLM 只负责页内沟通微动作。
+    if (this.state.phase === "greet") {
+      const phaseB = await this.runPhaseBRuntime(settings);
+      if (phaseB.handled) return { pause: phaseB.pause };
+    }
+
+    const snapshot = snapshotPage();
+    this.currentSnapshot = snapshot;
+    const intent = buildAgentIntent(settings, snapshot.currentQuery);
+    const payload = buildLlmPayload({
+      state: this.state, intent, snapshot,
+      currentQuery: snapshot.currentQuery, effectiveQuery: intent.query,
+      greetContext: this.state.phase === "greet" ? { message: settings.greetMessage } : undefined
+    });
+
+    const planned = await this.tools.planAction(payload);
+    const decision = planned.decision;
+    const ctx = {
+      snapshot,
+      phase: this.state.phase,
+      greetMessage: settings.greetMessage,
+      jobsCollected: this.state.jobsCollected,
+      filterCompleted: this.state.filterCompleted,
+      ranked: this.state.ranked
+    };
+    const validation = this.tools.validateDecision(decision, ctx);
+    if (!validation.ok) {
+      const message = `决策校验失败：${validation.reason}`;
+      this.state = bumpState({ ...this.state, error: message, lastDecision: `${decision.action}: ${decision.reason}` }, nowIso());
+      this.persist();
+      await this.setStatus(false, message);
+      return { pause: false };
+    }
+
+    // 卡死检测：统一由 guardrails.recordAction 记录；命中阈值后在下一轮 run() 开头由 shouldBreak 判定。
+    const sig = snapshot.summary;
+    const h = hashAction(decision);
+    this.state = recordAction(this.state, h, sig);
+
+    // 累计 cost 进 state（供下一轮 payload 使用）
+    this.state.tokensUsed += planned.usage.tokensIn + planned.usage.tokensOut;
+    this.state.costYuan = planned.usage.cumulativeYuan;
+
+    if (decision.action === "pause") {
+      this.state = bumpState({ ...this.state, step: "awaiting_input", error: decision.reason, lastDecision: `pause: ${decision.reason}` }, nowIso());
+      this.persist();
+      await this.setStatus(true, decision.reason, "awaiting_input");
+      return { pause: true };
+    }
+
+    if (decision.action === "request_greet_approval") {
+      // 前置三件套（jobsCollected && filterCompleted && ranked）已由 validateDecision 校验通过。
+      // 完成校验：effectiveQuery 是否已在页面落实（或无对应控件）。
+      const { satisfied, missing } = effectiveQuerySatisfied(intent.query, snapshot.currentQuery, snapshot);
+      if (!satisfied) {
+        const message = `筛选未完成：${missing.join("、")}`;
+        this.state = bumpState({ ...this.state, error: message, lastDecision: `request_greet_approval: ${decision.reason}` }, nowIso());
+        this.persist();
+        await this.setStatus(false, message);
+        await sleep(400);
+        return { pause: false };
+      }
+      // 满足 → 请求人工审批打招呼，进入等待。
+      const approval = await this.tools.requestApproval({
+        action: "greet",
+        title: "打招呼审批",
+        description: `已排序 ${this.state.lastRankedJobs.length} 个岗位，是否开始打招呼？`,
+        jobs: this.state.lastRankedJobs
+      });
+      void approval;
+      this.state = bumpState({ ...this.state, step: "awaiting_approval", lastDecision: `request_greet_approval: ${decision.reason}` }, nowIso());
+      this.persist();
+      await this.persistRecovery();
+      await this.setStatus(true, "已请求打招呼审批，等待人工确认", "awaiting_approval");
+      return { pause: true };
+    }
+
+    let result: AgentActionResult;
+    let pageMayChange = false;
+    // Phase B 的 fill 一律用 forceGreetMessage（executeBrowserAction 会用 settings.greetMessage 覆盖 value）。
+    const forceGreetMessage = this.state.phase === "greet";
     switch (decision.action) {
       case "click":
       case "fill":
-      case "select":
       case "scroll":
-      case "next_page":
-      case "open_jobs":
-      case "apply_filters":
-        return await this.tools.executeBrowserAction(decision);
-      case "open_profile": {
-        const link = await this.tools.findProfileEntry();
-        if (!link) return { ok: false, message: "没有找到简历入口" };
-        await this.tools.navigate(link);
-        return { ok: true, message: "正在进入简历页", pageMayChange: true };
+        result = await this.tools.executeBrowserAction(decision, { phase: this.state.phase, greetMessage: settings.greetMessage, forceGreetMessage });
+        pageMayChange = Boolean(result.pageMayChange);
+        break;
+      case "next_page": {
+        result = await this.tools.executeBrowserAction(decision, { phase: this.state.phase, greetMessage: settings.greetMessage, forceGreetMessage: false });
+        pageMayChange = Boolean(result.pageMayChange);
+        this.state.pagesVisited += 1;
+        const sigAfter = `${location.href}|${document.querySelector<HTMLAnchorElement>("a[href*='/job_detail/'], a[href*='/job/']")?.href || ""}`;
+        if (!this.state.visitedPageSignatures.includes(sigAfter)) this.state.visitedPageSignatures.push(sigAfter);
+        break;
       }
-      case "import_profile": {
-        const result = await this.tools.importProfile();
-        return { ok: result.ok, message: result.ok ? "简历信息已读取" : result.reason || "简历读取失败" };
+      case "open_jobs": {
+        const link = await this.tools.findJobsEntry();
+        if (!link) {
+          result = { ok: false, message: "没有找到职位列表入口" };
+        } else {
+          await this.tools.navigate(link);
+          result = { ok: true, message: "正在进入职位列表页" };
+          pageMayChange = true;
+        }
+        break;
       }
       case "collect_jobs": {
-        if (!this.tools.hasJobCards()) return { ok: false, message: "当前页面没有可读取的岗位卡片" };
-        this.candidates = await this.tools.extractJobs();
-        this.state.candidateCount = this.candidates.length;
-        this.state.jobsCollected = true;
-        this.persistCandidates();
-        return { ok: true, message: `已收集 ${this.candidates.length} 个岗位` };
+        if (!this.tools.hasJobCards()) {
+          result = { ok: false, message: "当前页面没有可读取的岗位卡片" };
+        } else {
+          const visible = await this.tools.extractJobs();
+          // 合并候选池（去重 by url），不在此处翻页——翻页由 next_page 驱动。
+          const merged = new Map<string, Job>(this.candidates.map(j => [j.url, j]));
+          for (const j of visible) merged.set(j.url, j);
+          this.candidates = [...merged.values()];
+          this.state.candidateCount = this.candidates.length;
+          this.state.jobsCollected = true;
+          this.persistCandidates();
+          result = { ok: true, message: `已收集 ${visible.length} 个岗位，累计 ${this.candidates.length}` };
+        }
+        break;
       }
       case "filter_jobs": {
-        if (!this.candidates.length) return { ok: false, message: "还没有岗位候选，无法执行岗位过滤" };
-        this.candidates = await this.tools.filterJobs(this.candidates);
-        this.state.filteredCount = this.candidates.length;
-        this.state.filterCompleted = true;
-        this.persistCandidates();
-        return { ok: true, message: `过滤后剩余 ${this.candidates.length} 个岗位` };
+        if (!this.candidates.length) {
+          result = { ok: false, message: "还没有岗位候选，无法过滤" };
+        } else {
+          this.candidates = await this.tools.filterJobs(this.candidates);
+          this.state.filteredCount = this.candidates.length;
+          this.state.filterCompleted = true;
+          this.persistCandidates();
+          result = { ok: true, message: `过滤后剩余 ${this.candidates.length} 个岗位` };
+        }
+        break;
       }
       case "rank_jobs": {
-        if (!this.candidates.length) return { ok: false, message: "没有符合条件的岗位可供排序" };
-        this.candidates = await this.tools.rankJobs(this.candidates);
-        this.state.ranked = true;
-        this.persistCandidates();
-        await this.tools.saveJobs(this.candidates);
-        return { ok: true, message: `已完成 ${this.candidates.length} 个岗位的匹配排序` };
+        if (!this.candidates.length) {
+          result = { ok: false, message: "没有岗位可供排序" };
+        } else {
+          this.candidates = await this.tools.rankJobs(this.candidates);
+          this.state.ranked = true;
+          this.state.lastRankedJobs = this.candidates;
+          this.persistCandidates();
+          await this.tools.saveJobs(this.candidates);
+          result = { ok: true, message: `已完成 ${this.candidates.length} 个岗位的匹配排序` };
+        }
+        break;
       }
-      case "finish":
-        await this.tools.saveJobs(this.candidates);
-        return { ok: true, message: `Agent 已完成目标，共 ${this.candidates.length} 个岗位` };
-      case "pause":
-        return { ok: true, message: decision.reason };
+      default:
+        // AgentDecision.action 仅含 LlmAction；RuntimeAction（open_approved_job/finish）由 runPhaseBRuntime 接管，不会走到这里。
+        result = { ok: false, message: `未知动作：${decision.action}` };
+        break;
     }
+
+    if (!result.ok) {
+      const message = result.message;
+      this.state = bumpState({ ...this.state, error: message, lastDecision: `${decision.action}: ${decision.reason}` }, nowIso());
+      this.persist();
+      await this.setStatus(false, `${message}；Agent 将重新观察并调整动作`);
+      await sleep(800);
+      return { pause: false };
+    }
+
+    // Phase B FSM：根据刚执行的动作 + 快照推 event，推进 greetStatus。
+    if (this.state.phase === "greet") {
+      const advanced = await this.advanceGreetFsm(decision, snapshot);
+      if (advanced) return { pause: advanced.pause };
+    }
+
+    this.state = bumpState({
+      ...this.state,
+      error: "",
+      phaseTurns: this.state.phaseTurns + 1,
+      lastDecision: `${decision.action}: ${decision.reason}`
+    }, nowIso());
+    this.persist();
+    await this.setStatus(true, result.message);
+
+    if (pageMayChange) {
+      setTimeout(() => void this.resume(), 1200);
+      return { pause: true };
+    }
+    await sleep(400);
+    return { pause: false };
   }
 
   private async run(): Promise<void> {
     for (let turn = 0; turn < MAX_TURNS; turn += 1) {
       try {
         const settings = await this.tools.getSettings();
-        const observation = this.tools.observePage();
-        const currentQuery = this.tools.readQueryContext();
-        const intent = buildAgentIntent(settings, currentQuery);
-        const context: AgentContext = {
-          goal: this.state.goal || "screen_jobs",
-          intent,
-          settings,
-          currentQuery,
-          profileReady: Boolean(settings.candidateProfileClean),
-          candidatesCount: this.state.candidateCount || this.candidates.length,
-          filteredCount: this.state.filteredCount,
-          ranked: this.state.ranked,
-          observation,
-          state: this.state
-        };
-        await this.transition("thinking", "Agent 正在观察页面并请求 LLM 决策…");
-        const decision = await this.tools.planAction(context);
-        this.state.lastDecision = `${decision.action}: ${decision.reason}`;
-        this.persist();
 
-        if (decision.action === "pause") {
-          await this.transition("awaiting_input", decision.reason);
-          return;
-        }
-        const step = ACTION_STEP[decision.action] || "idle";
-        await this.transition(step, `Agent 决定：${decision.reason}`);
-        const result = await this.executeDecision(decision);
-        if (!result.ok) {
-          this.state.error = result.message;
+        // 停止按钮：每轮开头、执行任何动作前检查 chrome.storage.local.stopRequested。
+        const { stopRequested } = await chrome.storage.local.get({ stopRequested: false });
+        if (stopRequested) {
+          await chrome.storage.local.remove("stopRequested");
+          const message = "用户已请求停止 Agent";
+          this.state = bumpState({ ...this.state, step: "awaiting_input", error: message, lastDecision: "stop_requested" }, nowIso());
           this.persist();
-          await this.tools.setStatus({ ok: false, message: `${result.message}；Agent 将重新观察并调整动作`, step, runId: this.state.runId, state: this.state });
-          await new Promise(resolve => setTimeout(resolve, 900));
-          continue;
-        }
-        if (!result.pageMayChange) {
-          const verification = await this.tools.verifyAction(decision, observation);
-          if (!verification.ok) {
-            this.state.error = verification.message;
-            this.persist();
-            await this.tools.setStatus({ ok: false, message: `${verification.message}；Agent 将重新规划`, step, runId: this.state.runId, state: this.state });
-            await new Promise(resolve => setTimeout(resolve, 700));
-            continue;
-          }
-          await this.transition("acting", verification.message);
-        }
-        this.state.error = "";
-        this.persist();
-        if (decision.action === "finish") {
-          await this.transition("done", result.message);
+          await this.setStatus(true, message, "awaiting_input");
           return;
         }
-        await this.tools.setStatus({ ok: true, message: result.message, step, runId: this.state.runId, state: this.state, tool: decision.action });
-        if (result.pageMayChange) {
-          setTimeout(() => void this.resume(), 1500);
+
+        // 护栏：费用熔断 / 轮数上限 / 卡死 / greetCap。费用由上一轮 planAction 写入 state.costYuan，此处生效。
+        const brk = shouldBreak(this.state, settings);
+        if (brk) {
+          this.state = bumpState({ ...this.state, step: "awaiting_input", error: brk.reason, lastDecision: `guardrail: ${brk.reason}` }, nowIso());
+          this.persist();
+          await this.setStatus(true, brk.reason, "awaiting_input");
           return;
         }
-        await new Promise(resolve => setTimeout(resolve, 450));
+
+        const { pause } = await this.executeTurn(settings);
+        if (pause) return;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error || "Agent 执行失败");
-        this.state = nextState(this.state, "failed", message);
+        this.state = bumpState({ ...this.state, step: "failed", error: message }, nowIso());
         this.persist();
-        await this.tools.setStatus({ ok: false, message, step: "failed", runId: this.state.runId, state: this.state });
+        await this.setStatus(false, message, "failed");
         return;
       }
     }
     const message = `Agent 已达到本轮最大观察次数（${MAX_TURNS}），已暂停以避免重复操作`;
-    this.state = nextState(this.state, "awaiting_input", message);
+    this.state = bumpState({ ...this.state, step: "awaiting_input", error: message }, nowIso());
     this.persist();
-    await this.tools.setStatus({ ok: true, message, step: "awaiting_input", runId: this.state.runId, state: this.state });
+    await this.setStatus(true, message, "awaiting_input");
   }
 }

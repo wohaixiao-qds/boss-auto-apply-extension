@@ -1,4 +1,4 @@
-const fields = ["jobKeywords", "targetLocations", "targetSalary", "workMode", "jobTypes", "workExperience", "education", "companyIndustries", "companySizes", "maxPages", "excludeCompanies", "minMatchScore", "aiBaseUrl", "aiModel", "aiApiKey"] as const;
+const fields = ["jobKeywords", "targetLocations", "targetSalary", "workMode", "jobTypes", "workExperience", "education", "companyIndustries", "companySizes", "maxPages", "excludeCompanies", "minMatchScore", "aiBaseUrl", "aiModel", "aiApiKey", "costThresholdYuan", "inputPriceYuanPerMillion", "outputPriceYuanPerMillion", "greetCap", "greetMessage"] as const;
 type Field = typeof fields[number];
 
 function input(id: string): HTMLInputElement | HTMLTextAreaElement {

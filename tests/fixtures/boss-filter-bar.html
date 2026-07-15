@@ -1,0 +1,19 @@
+<!--
+  合成 fixture（SYNTHETIC）：模拟 BOSS 直聘职位列表页筛选栏结构。
+  结构贴近真实 DOM：.search-condition 容器 + .filter-item chip，每个 chip
+  含一个 .cur 子节点表示当前选中值。选择器对齐 src/agent/snapshot.ts 的 regionOf/chipCurrent。
+  待真实样本替换（见 tests/integration/FIXTURE-CAPTURE.md）。
+-->
+<div class="search-condition">
+  <div class="filter-list">
+    <a class="filter-item" ka="filter-salary">薪资<span class="cur">15-25K</span></a>
+    <a class="filter-item" ka="filter-experience">经验<span class="cur">3-5年</span></a>
+    <a class="filter-item" ka="filter-education">学历<span class="cur">本科</span></a>
+    <a class="filter-item" ka="filter-city">城市<span class="cur">北京</span></a>
+    <a class="filter-item" ka="filter-jobtype">求职类型<span class="cur">全职</span></a>
+  </div>
+  <div class="search-box">
+    <input type="search" class="search-input" placeholder="搜索职位" value="Java" />
+    <button class="btn-search" ka="search-submit">搜索</button>
+  </div>
+</div>

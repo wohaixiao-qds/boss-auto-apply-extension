@@ -37,6 +37,15 @@
         <p class="tokens">中转地址填写到 /v1，插件会请求 /chat/completions。</p>
       </fieldset>
 
+      <fieldset>
+        <legend>费用与打招呼</legend>
+        <label>费用阈值（元，超出则停止）<input id="costThresholdYuan" type="number" min="0" step="0.01" placeholder="5" /></label>
+        <label>输入单价（元 / 百万 token）<input id="inputPriceYuanPerMillion" type="number" min="0" step="0.01" placeholder="0" /></label>
+        <label>输出单价（元 / 百万 token）<input id="outputPriceYuanPerMillion" type="number" min="0" step="0.01" placeholder="0" /></label>
+        <label>打招呼上限（人）<input id="greetCap" type="number" min="0" step="1" placeholder="10" /></label>
+        <label>打招呼话术<textarea id="greetMessage" rows="3" placeholder="您好，对这个岗位很感兴趣，希望进一步沟通"></textarea></label>
+      </fieldset>
+
       <button id="save">保存岗位筛选设置</button>
       <span id="status"></span>
     </main>
