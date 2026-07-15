@@ -101,6 +101,8 @@ chrome.runtime.onMessage.addListener((message: any, sender, sendResponse) => {
       return respond(chrome.storage.local.get({ agentRecovery: null }).then(({ agentRecovery }) => ({ ok: true, mirror: agentRecovery })));
     case "RESUME_AGENT":
       return respond(resumeAgent().then(() => ({ ok: true })));
+    case "STOP_AGENT":
+      return respond(chrome.storage.local.set({ stopRequested: true }).then(() => ({ ok: true })));
     case "RESOLVE_UNKNOWN_GREET": {
       const url = typeof message.url === "string" ? message.url : "";
       const verdict: "sent" | "skipped" = message.verdict === "sent" ? "sent" : "skipped";

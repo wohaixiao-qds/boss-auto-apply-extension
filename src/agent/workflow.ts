@@ -6,6 +6,7 @@ import { executeBrowserAction } from "./browser-action";
 import { buildLlmPayload } from "./payload";
 import { mergeRecovery } from "./recovery";
 import { nextGreetStatus, greetVerify } from "./greet";
+import { shouldBreak, recordAction } from "./guardrails";
 import type { AgentActionResult, AgentDecision, AgentState, AgentStep, AgentTools, Job, PageSnapshot, Settings } from "../types";
 
 const STORAGE_KEY = "boss-agent-state";
@@ -390,23 +391,10 @@ export class AgentRunner {
       return { pause: false };
     }
 
-    // 卡死检测
+    // 卡死检测：统一由 guardrails.recordAction 记录；命中阈值后在下一轮 run() 开头由 shouldBreak 判定。
     const sig = snapshot.summary;
     const h = hashAction(decision);
-    if (h === this.state.lastActionHash && sig === this.state.lastProgressSignature) {
-      this.state.sameActionCount += 1;
-    } else {
-      this.state.sameActionCount = 0;
-    }
-    this.state.lastActionHash = h;
-    this.state.lastProgressSignature = sig;
-    if (this.state.sameActionCount >= 3) {
-      const message = "Agent 检测到重复动作且页面无进展，已暂停";
-      this.state = bumpState({ ...this.state, step: "awaiting_input", error: message, lastDecision: `${decision.action}: ${decision.reason}` }, nowIso());
-      this.persist();
-      await this.setStatus(true, message, "awaiting_input");
-      return { pause: true };
-    }
+    this.state = recordAction(this.state, h, sig);
 
     // 累计 cost 进 state（供下一轮 payload 使用）
     this.state.tokensUsed += planned.usage.tokensIn + planned.usage.tokensOut;
@@ -559,6 +547,27 @@ export class AgentRunner {
     for (let turn = 0; turn < MAX_TURNS; turn += 1) {
       try {
         const settings = await this.tools.getSettings();
+
+        // 停止按钮：每轮开头、执行任何动作前检查 chrome.storage.local.stopRequested。
+        const { stopRequested } = await chrome.storage.local.get({ stopRequested: false });
+        if (stopRequested) {
+          await chrome.storage.local.remove("stopRequested");
+          const message = "用户已请求停止 Agent";
+          this.state = bumpState({ ...this.state, step: "awaiting_input", error: message, lastDecision: "stop_requested" }, nowIso());
+          this.persist();
+          await this.setStatus(true, message, "awaiting_input");
+          return;
+        }
+
+        // 护栏：费用熔断 / 轮数上限 / 卡死 / greetCap。费用由上一轮 planAction 写入 state.costYuan，此处生效。
+        const brk = shouldBreak(this.state, settings);
+        if (brk) {
+          this.state = bumpState({ ...this.state, step: "awaiting_input", error: brk.reason, lastDecision: `guardrail: ${brk.reason}` }, nowIso());
+          this.persist();
+          await this.setStatus(true, brk.reason, "awaiting_input");
+          return;
+        }
+
         const { pause } = await this.executeTurn(settings);
         if (pause) return;
       } catch (error) {

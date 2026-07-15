@@ -264,6 +264,10 @@ async function scan(): Promise<void> {
 
 $("bootstrap").addEventListener("click", () => void bootstrap());
 $("scan").addEventListener("click", () => void scan());
+$("stopAgent").addEventListener("click", async () => {
+  await runtimeMessage({ type: "STOP_AGENT" });
+  setNotice("已请求停止 Agent，下一轮开头生效");
+});
 $("clearData").addEventListener("click", async () => {
   if (!confirm("重置本次 Agent 任务和已导入结果？岗位筛选设置和模型配置会保留。")) return;
   await runtimeMessage({ type: "CLEAR_IMPORTED_DATA" });
