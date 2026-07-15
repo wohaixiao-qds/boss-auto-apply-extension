@@ -53,4 +53,35 @@ describe("snapshotPage", () => {
     const snap = snapshotPage();
     expect(snap.elements.some(e => e.region === "pager")).toBe(true);
   });
+
+  it("keeps empty textarea with placeholder in chat region", () => {
+    document.body.innerHTML = `<div class="chat-container"><textarea class="message-input" placeholder="请输入招呼语"></textarea></div>`;
+    const snap = snapshotPage();
+    const ta = snap.elements.find(e => e.role === "input");
+    expect(ta).toBeTruthy();
+    expect(ta!.text).toBe("");
+    expect(ta!.region).toBe("chat");
+    expect(ta!.hint).toBe("请输入招呼语");
+  });
+
+  it("keeps empty search input with placeholder in search region", () => {
+    document.body.innerHTML = `<div class="search-box"><input class="search-input" placeholder="搜索职位/公司" /></div>`;
+    const snap = snapshotPage();
+    const inp = snap.elements.find(e => e.role === "input");
+    expect(inp).toBeTruthy();
+    expect(inp!.text).toBe("");
+    expect(inp!.region).toBe("search");
+    expect(inp!.hint).toBe("搜索职位/公司");
+  });
+
+  it("does not dedupe multiple empty inputs with different placeholders", () => {
+    document.body.innerHTML = `
+      <div class="search-box"><input placeholder="搜索职位" /></div>
+      <div class="chat-container"><textarea placeholder="请输入招呼语"></textarea></div>`;
+    const snap = snapshotPage();
+    const inputs = snap.elements.filter(e => e.role === "input");
+    expect(inputs.length).toBe(2);
+    const hints = inputs.map(e => e.hint).sort();
+    expect(hints).toEqual(["搜索职位", "请输入招呼语"]);
+  });
 });

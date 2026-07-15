@@ -118,22 +118,35 @@ export function snapshotPage(): PageSnapshot {
   const raw = scopeEls.flatMap(scope => [...scope.querySelectorAll<HTMLElement>(candidate)])
     .filter(isVisibleEl)
     .filter(el => el.children.length === 0 || /INPUT|TEXTAREA|SELECT|BUTTON|A/.test(el.tagName) || el.getAttribute("role"))
-    .filter(el => textOf(el).length > 0 && textOf(el).length <= 40);
+    .filter(el => {
+      // input/textarea/select 即使文本为空也保留（空打招呼框、空搜索框需要被 LLM 选中 fill），
+      // 它们以 placeholder/aria-label 作为可读名；其它元素仍要求非空且 <=40 字。
+      const tag = el.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+      const t = textOf(el);
+      return t.length > 0 && t.length <= 40;
+    });
 
   // 去重 + 分区计数 + 强制保留 filter/pager/chat
+  // 去重 key: input 类元素可能多个都 text=""（如多个空输入框），单纯按 text 去重会互相吞并。
+  // 对这类元素并入 hint(placeholder/aria-label)/region/tag，保证不同空输入框各自保留。
   const seenText = new Set<string>();
   const buckets: Record<SnapshotRegion, SnapshotElement[]> = { search: [], filter: [], pager: [], chat: [], job: [], other: [] };
   let id = 0;
   for (const el of raw) {
     const text = textOf(el);
-    if (seenText.has(text)) continue;
-    seenText.add(text);
+    const tag = el.tagName;
+    const isInputLike = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+    const hint = (el as HTMLInputElement).placeholder || el.getAttribute("aria-label") || undefined;
     const region = regionOf(el);
+    const dedupeKey = isInputLike ? `${text}|${hint || ""}|${region}|${tag}` : text;
+    if (seenText.has(dedupeKey)) continue;
+    seenText.add(dedupeKey);
     const bucket = buckets[region];
     if (region !== "filter" && region !== "pager" && region !== "chat" && bucket.length >= SNAPSHOT_BUDGET[region]) continue;
     const sid = String(id++);
     snapshotRefs.set(sid, el);
-    bucket.push({ id: sid, role: roleOf(el), text: text.slice(0, 40), current: chipCurrent(el), checked: el.getAttribute("aria-selected") === "true" || el.getAttribute("aria-checked") === "true" || (el as HTMLInputElement).checked === true, hint: (el as HTMLInputElement).placeholder || el.getAttribute("aria-label") || undefined, region });
+    bucket.push({ id: sid, role: roleOf(el), text: text.slice(0, 40), current: chipCurrent(el), checked: el.getAttribute("aria-selected") === "true" || el.getAttribute("aria-checked") === "true" || (el as HTMLInputElement).checked === true, hint, region });
   }
   const elements = [...buckets.filter, ...buckets.pager, ...buckets.chat, ...buckets.search, ...buckets.job, ...buckets.other];
   const currentQuery = deriveCurrentQuery(elements);
