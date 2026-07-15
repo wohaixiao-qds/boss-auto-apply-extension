@@ -261,7 +261,10 @@ async function refresh(): Promise<void> {
   renderCostReadout(status);
   renderUnknown(status);
   const tab = await sourceTab();
-  const context = tab?.id ? await tabsMessage<AgentContextSnapshot>(tab.id, { type: "GET_AGENT_CONTEXT" }) : null;
+  const contextRaw = tab?.id ? await tabsMessage<AgentContextSnapshot & { ok?: boolean; error?: string; snapshot?: PageSnapshot }>(tab.id, { type: "GET_AGENT_CONTEXT" }) : null;
+  // GET_AGENT_CONTEXT 出错时返回 {ok:false,error}（truthy 但非 context），renderAgentContext 会当 context 崩。
+  // 只当确有 snapshot 字段才当 context，否则按 null 处理。
+  const context = contextRaw && contextRaw.snapshot ? contextRaw : null;
   renderAgentContext(context, status);
   if (status?.message) setNotice(status.message, status.ok === false);
   renderApproval(approval?.pendingApproval || null);
