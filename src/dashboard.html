@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>BOSS 求职 Agent</title>
+    <link rel="stylesheet" href="dashboard.css" />
+  </head>
+  <body>
+    <header class="topbar"><div><div class="eyebrow">BOSS 求职助手</div><h1>求职 Agent</h1></div><div id="status" class="status-pill idle">待启动</div></header>
+    <main class="shell">
+      <section class="toolbar card">
+        <button id="bootstrap" class="primary">开始智能筛选</button>
+        <button id="scan" class="secondary">筛选当前页面</button>
+        <button id="clearData" class="danger">重置本次任务</button>
+        <button id="settings" class="secondary">岗位筛选设置</button>
+        <span id="notice" class="notice"></span>
+      </section>
+
+      <section class="agent-overview">
+        <article class="card intent-card">
+          <div class="section-title"><h2>Agent 当前目标</h2><span id="intentSource">等待形成意图</span></div>
+          <div id="intentSummary" class="intent-summary">Agent 会先读取简历和你的岗位设置，再决定下一步操作。</div>
+          <div id="intentTags" class="tags"><span>尚未分析</span></div>
+        </article>
+        <article class="card decision-card">
+          <div class="section-title"><h2>Agent 当前判断</h2><span id="currentPage">页面识别中…</span></div>
+          <div class="decision-row"><span class="decision-label">最近一次判断</span><strong id="lastDecision">尚未开始</strong></div>
+          <div class="decision-row"><span class="decision-label">下一步动作</span><strong id="nextAction">等待观察页面</strong></div>
+        </article>
+      </section>
+
+      <section class="card query-plan-card">
+        <div class="section-title"><h2>查询计划</h2><span>Agent 会把目标转换成 BOSS 页面操作</span></div>
+        <div class="query-grid">
+          <div class="query-column"><span class="query-label">BOSS 当前条件</span><div id="currentQuerySummary" class="tags query-tags"><span>尚未读取页面</span></div></div>
+          <div class="query-arrow" aria-hidden="true">→</div>
+          <div class="query-column"><span class="query-label">Agent 目标条件</span><div id="filterSummary" class="tags query-tags"><span>尚未设置，点击“岗位筛选设置”</span></div></div>
+        </div>
+      </section>
+
+      <section class="card agent-progress" aria-label="Agent 执行进度">
+        <div class="progress-title"><strong>Agent 执行进度</strong><span id="progressLabel">等待启动</span></div>
+        <div class="progress-steps">
+          <span data-agent-step="thinking">1. 观察页面</span>
+          <span data-agent-step="acting">2. LLM 决策并执行</span>
+          <span data-agent-step="verifying">3. 验证页面反馈</span>
+          <span data-agent-step="awaiting_input">等待补充目标</span>
+          <span data-agent-step="done">已完成</span>
+        </div>
+      </section>
+
+      <section id="approvalCard" class="card" style="display:none">
+        <div class="section-title"><h2>需要你的确认</h2><span id="approvalAction"></span></div>
+        <p id="approvalDescription"></p>
+        <button id="approveAction" class="primary">批准</button>
+        <button id="rejectAction" class="danger">拒绝</button>
+      </section>
+
+      <section class="card profile-card">
+        <div class="section-title"><h2>简历分析</h2><span id="profileTime">尚未导入</span></div>
+        <div id="profileSummary" class="summary empty">点击“开始智能筛选”，Agent 会先读取当前简历</div>
+        <details id="profileDetails" class="profile-details" style="display:none">
+          <summary>查看清洗后的简历原文</summary>
+          <div id="profileRaw" class="profile-raw"></div>
+        </details>
+      </section>
+
+      <section class="card jobs-card">
+        <div class="section-title"><h2>匹配岗位</h2><span id="jobCount">尚未筛选</span></div>
+        <div class="table-wrap"><table><thead><tr><th>匹配</th><th>公司</th><th>职位</th><th>地点</th><th>薪资</th><th>判断理由</th></tr></thead><tbody id="jobsBody"><tr><td colspan="6" class="empty-cell">暂无结果</td></tr></tbody></table></div>
+      </section>
+
+      <section class="card ai-card"><div class="section-title"><h2>模型状态</h2><span id="aiStatus">检查中…</span></div><p id="aiDetails">模型用于清洗简历、分析求职意向和判断岗位匹配度。</p></section>
+    </main>
+    <script src="dashboard.js"></script>
+  </body>
+</html>

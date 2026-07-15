@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "BOSS 求职助手（Copilot）",
+  "version": "0.3.0",
+  "description": "可恢复地导入简历、分析求职意向并筛选匹配职位；高风险动作保留用户确认。",
+  "permissions": ["storage", "activeTab", "tabs", "sidePanel"],
+  "host_permissions": ["https://www.zhipin.com/*", "https://zhipin.com/*", "https://api.openai.com/*"],
+  "optional_host_permissions": ["https://*/*", "http://*/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "BOSS 求职助手",
+    "default_popup": "popup.html"
+  },
+  "side_panel": {
+    "default_path": "dashboard.html"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.zhipin.com/*", "https://zhipin.com/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}
