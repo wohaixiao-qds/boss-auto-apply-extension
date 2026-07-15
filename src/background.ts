@@ -62,7 +62,9 @@ chrome.runtime.onMessage.addListener((message: any, sender, sendResponse) => {
         title: String(input.title || "需要人工确认"),
         description: String(input.description || "Agent 请求执行一个需要用户确认的动作。"),
         createdAt: new Date().toISOString(),
-        status: "pending"
+        status: "pending",
+        // P1-001：保留岗位清单，否则 dashboard 拿不到可勾选的岗位
+        jobs: Array.isArray(input.jobs) ? input.jobs : undefined
       };
       return respond(chrome.storage.local.set({ pendingApproval: approval }).then(() => ({ ok: true, approval })));
     }
@@ -139,7 +141,12 @@ chrome.runtime.onMessage.addListener((message: any, sender, sendResponse) => {
         bootstrapStatus: EMPTY_BOOTSTRAP_STATUS,
         agentState: null,
         pendingApproval: null,
-        lastApproval: null
+        lastApproval: null,
+        // P2-002：重置必须同时清掉恢复镜像 / 停止标志 / 费用累计，
+        // 否则新任务一启动就被旧 stopRequested 停、或合并旧 agentRecovery、或费用继续累加。
+        agentRecovery: null,
+        stopRequested: null,
+        agentRunCost: null
       }).then(() => ({ ok: true })));
     case "PLAN_AGENT_ACTION":
       return respond(planAgentAction(message.payload));

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { validateDecision, validateSelectedUrls } from "../../src/agent/validate";
+import { validateDecision, validateSelectedUrls, effectiveQuerySatisfied } from "../../src/agent/validate";
 import type { AgentDecision, PageSnapshot, Settings, Job } from "../../src/types";
 
 const snap = (ids: string[]): PageSnapshot => ({
@@ -12,6 +12,18 @@ const dec = (over: Partial<AgentDecision>): AgentDecision => ({ snapshotId: "sna
 const ctxBase = { phase: "screen" as const, greetMessage: "您好", jobsCollected: true, filterCompleted: true, ranked: true };
 
 describe("validateDecision", () => {
+  // P1-003：Phase B 必须只允许 click/fill/scroll/pause，禁止 Phase A 的动作污染两阶段隔离。
+  it("Phase B forbids collect_jobs / filter_jobs / rank_jobs / next_page / open_jobs / request_greet_approval", () => {
+    const s = snap(["0"]);
+    // next_page 需要合法 pager ref 才能越过 next_page region 校验，暴露 Phase B 白名单拦截。
+    s.elements[0].region = "pager";
+    s.elements[0].text = "下一页";
+    for (const action of ["collect_jobs", "filter_jobs", "rank_jobs", "next_page", "open_jobs", "request_greet_approval"] as const) {
+      const r = validateDecision(dec({ action, ref: action === "next_page" ? "0" : undefined }), { ...ctxBase, phase: "greet", snapshot: s });
+      expect(r.ok, action).toBe(false);
+      expect(r.reason, action).toMatch(/Phase B/);
+    }
+  });
   it("rejects snapshotId mismatch", () => {
     const r = validateDecision(dec({ snapshotId: "other", action: "click", ref: "0" }), { ...ctxBase, snapshot: snap(["0"]) });
     expect(r.ok).toBe(false);
@@ -94,5 +106,28 @@ describe("validateSelectedUrls", () => {
     expect(r.valid.length).toBe(1);
     expect(r.rejected.length).toBe(2);
     expect(r.rejected.every(x => x.includes("重复"))).toBe(true);
+  });
+});
+
+
+describe("effectiveQuerySatisfied (P1-004: keyword)", () => {
+  const empty = { keyword: "", location: [], salary: [], jobTypes: [], workModes: [], experience: [], education: [], industries: [], companySizes: [], source: "unknown" as const };
+  const snap = (filterTexts: string[]): PageSnapshot => ({
+    snapshotId: "s", kind: "jobs", url: "/x", path: "/x",
+    currentQuery: empty, summary: "",
+    elements: filterTexts.map((t, i) => ({ id: String(i), role: "btn" as const, text: t, region: "filter" as const }))
+  });
+  it("keyword missing -> in missing[]", () => {
+    const effective = { ...empty, keyword: "前端" };
+    const current = { ...empty, keyword: "" };
+    const r = effectiveQuerySatisfied(effective, current, snap([]));
+    expect(r.satisfied).toBe(false);
+    expect(r.missing).toContain("keyword");
+  });
+  it("keyword satisfied -> not in missing[]", () => {
+    const effective = { ...empty, keyword: "前端" };
+    const current = { ...empty, keyword: "前端开发" };
+    const r = effectiveQuerySatisfied(effective, current, snap([]));
+    expect(r.missing).not.toContain("keyword");
   });
 });

@@ -25,6 +25,8 @@ export function validateDecision(d: AgentDecision, ctx: ValidationContext): { ok
     if (refEl && (refEl.region === "chat" || /立即沟通|打招呼|沟通/.test(refEl.text))) return { ok: false, reason: "Phase A 不允许沟通操作" };
   }
   if (ctx.phase === "greet") {
+    // P1-003：Phase B 只允许 click/fill/scroll/pause（pause 已早返回）；其余动作（含 collect_jobs/filter_jobs/rank_jobs/next_page/open_jobs/request_greet_approval）一律拒绝，保两阶段隔离。
+    if (!["click", "fill", "scroll"].includes(d.action)) return { ok: false, reason: `Phase B 不允许动作：${d.action}` };
     if (refEl && refEl.region === "filter") return { ok: false, reason: "Phase B 不允许改筛选" };
     if (d.action === "fill" && refEl && refEl.region !== "chat") return { ok: false, reason: "Phase B fill 必须落在 chat 区" };
   }
@@ -72,6 +74,11 @@ export function effectiveQuerySatisfied(effective: BossQueryContext, current: Bo
     ["experience", /经验/], ["education", /学历/], ["industries", /行业/], ["companySizes", /规模/]
   ];
   const missing: string[] = [];
+  // P1-004：keyword 是搜索框（region=search），总存在控件，直接校验值是否生效。
+  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, "");
+  if (effective.keyword && !norm(current.keyword).includes(norm(effective.keyword))) {
+    missing.push("keyword");
+  }
   for (const [dim, re] of dims) {
     const desired = effective[dim] as string[];
     if (!desired.length) continue;
