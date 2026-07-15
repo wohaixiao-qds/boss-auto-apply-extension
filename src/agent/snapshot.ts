@@ -139,11 +139,16 @@ export function snapshotPage(): PageSnapshot {
     const isInputLike = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
     const hint = (el as HTMLInputElement).placeholder || el.getAttribute("aria-label") || undefined;
     const region = regionOf(el);
-    const dedupeKey = isInputLike ? `${text}|${hint || ""}|${region}|${tag}` : text;
+    // P1-005：普通元素不能只按 text 去重——多个“确定/发送/沟通”或相同岗位标题会被合并。
+    // 并入 region/tag/hint/父级 class 片段，让不同上下文的同名控件各自保留。
+    const parentCls = (el.parentElement?.className?.toString() || "").slice(0, 24);
+    const dedupeKey = `${text}|${region}|${tag}|${hint || ""}|${parentCls}`;
     if (seenText.has(dedupeKey)) continue;
     seenText.add(dedupeKey);
     const bucket = buckets[region];
-    if (region !== "filter" && region !== "pager" && region !== "chat" && bucket.length >= SNAPSHOT_BUDGET[region]) continue;
+    // P2-001：所有 region 都按各自预算截断（filter/pager/chat 不再无限保留，避免 payload 膨胀）。
+    // filter/pager/chat 的预算已设得较宽松（见 SNAPSHOT_BUDGET），优先级靠排序前的强制保留保证。
+    if (bucket.length >= SNAPSHOT_BUDGET[region]) continue;
     const sid = String(id++);
     snapshotRefs.set(sid, el);
     bucket.push({ id: sid, role: roleOf(el), text: text.slice(0, 40), current: chipCurrent(el), checked: el.getAttribute("aria-selected") === "true" || el.getAttribute("aria-checked") === "true" || (el as HTMLInputElement).checked === true, hint, region });

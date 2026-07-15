@@ -21,7 +21,7 @@
       <section class="agent-overview">
         <article class="card intent-card">
           <div class="section-title"><h2>Agent 当前目标</h2><span id="intentSource">等待形成意图</span></div>
-          <div id="intentSummary" class="intent-summary">Agent 会先读取简历和你的岗位设置，再决定下一步操作。</div>
+          <div id="intentSummary" class="intent-summary">Agent 按你的“岗位筛选设置”在 BOSS 上筛选匹配岗位并打招呼。</div>
           <div id="intentTags" class="tags"><span>尚未分析</span></div>
         </article>
         <article class="card decision-card">
@@ -65,10 +65,10 @@
       </section>
 
       <section class="card profile-card">
-        <div class="section-title"><h2>简历分析</h2><span id="profileTime">尚未导入</span></div>
-        <div id="profileSummary" class="summary empty">点击“开始智能筛选”，Agent 会先读取当前简历</div>
+        <div class="section-title"><h2>求职意向</h2><span id="profileTime"></span></div>
+        <div id="profileSummary" class="summary empty">在“岗位筛选设置”里填写条件后开始筛选</div>
         <details id="profileDetails" class="profile-details" style="display:none">
-          <summary>查看清洗后的简历原文</summary>
+          <summary>展开意向摘要</summary>
           <div id="profileRaw" class="profile-raw"></div>
         </details>
       </section>
@@ -78,7 +78,7 @@
         <div class="table-wrap"><table><thead><tr><th>匹配</th><th>公司</th><th>职位</th><th>地点</th><th>薪资</th><th>判断理由</th></tr></thead><tbody id="jobsBody"><tr><td colspan="6" class="empty-cell">暂无结果</td></tr></tbody></table></div>
       </section>
 
-      <section class="card ai-card"><div class="section-title"><h2>模型状态</h2><span id="aiStatus">检查中…</span></div><p id="aiDetails">模型用于清洗简历、分析求职意向和判断岗位匹配度。</p></section>
+      <section class="card ai-card"><div class="section-title"><h2>模型状态</h2><span id="aiStatus">检查中…</span></div><p id="aiDetails">模型用于页面观察、筛选与打招呼决策。</p></section>
     </main>
     <script src="dashboard.js"></script>
   </body>

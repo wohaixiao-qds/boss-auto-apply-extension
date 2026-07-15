@@ -79,7 +79,7 @@ function renderSettings(settings: Settings): void {
   const profile = settings.candidateProfileClean || "";
   $("profileSummary").className = `summary${profile ? "" : " empty"}`;
   const summary = settings.jobIntent?.summary || profile.split(/\n+/).filter(Boolean).slice(0, 3).join("；");
-  $("profileSummary").textContent = summary || "点击“开始智能筛选”，Agent 会先读取当前简历";
+  $("profileSummary").textContent = summary || "在“岗位筛选设置”里填写条件后开始筛选";
   $("profileDetails").style.display = profile ? "block" : "none";
   $("profileRaw").textContent = profile;
   $("profileTime").textContent = settings.profileSyncedAt ? `已导入 ${new Date(settings.profileSyncedAt).toLocaleString()}` : "尚未导入";
@@ -100,9 +100,12 @@ function renderSettings(settings: Settings): void {
   ].filter(([, value]) => Boolean(value));
   $("filterSummary").innerHTML = filters.length ? filters.map(([label, value]) => `<span>${esc(label)}：${esc(value)}</span>`).join("") : "<span>尚未设置，点击“岗位筛选设置”</span>";
   const aiReady = Boolean(settings.aiEnabled && settings.aiApiKey);
-  $("aiStatus").textContent = aiReady ? `已连接 · ${settings.aiModel || "gpt-4o-mini"}` : "未连接，使用本地规则";
+  // P2-004：当前没有本地 Planner 兜底——无 LLM 时 planAgentAction 直接失败，UI 必须如实说明，不能说“使用本地规则”。
+  $("aiStatus").textContent = aiReady ? `已连接 · ${settings.aiModel || "gpt-4o-mini"}` : "未配置 LLM，无法启动";
   $("aiStatus").className = aiReady ? "connected" : "offline";
-  $("aiDetails").textContent = aiReady ? `模型：${settings.aiModel || "gpt-4o-mini"} · 用于简历清洗、意向分析和岗位匹配` : "请在设置中配置 API Base URL、模型和 API Key";
+  $("aiDetails").textContent = aiReady
+    ? `模型：${settings.aiModel || "gpt-4o-mini"} · 用于页面观察、筛选与打招呼决策`
+    : "请在设置中配置 API Base URL、模型和 API Key；无 LLM 时 Agent 无法运行。";
 }
 
 function queryValues(query: BossQueryContext): string[] {

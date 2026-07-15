@@ -145,6 +145,10 @@ export class AgentRunner {
    * sent → verified（并入 greeted，去重）；skipped → failed。随后推进到下一岗位。
    */
   resolveUnknownGreet(url: string, verdict: "sent" | "skipped"): void {
+    // P1-008：仅信任针对“当前批准列表内、且确实处于 unknown 态”的 url；其余一律忽略，
+    // 避免错误岗位被标记已发送、当前岗位被错误跳过、或重复提交多次推进 index。
+    if (!url || !this.state.approvedForGreet.includes(url)) return;
+    if (this.state.greetStatus[url] !== "unknown") return;
     const status = verdict === "sent" ? "verified" : "failed";
     this.state.greetStatus = { ...this.state.greetStatus, [url]: status };
     if (status === "verified" && !this.state.greeted.includes(url)) {
@@ -239,6 +243,14 @@ export class AgentRunner {
     if (!/(^|\.)zhipin\.com$/i.test(parsed.hostname)) {
       return await this.failCurrentJob(url, "非 zhipin 域");
     }
+    // P1-009：导航（tabs.update）会硬跳转并销毁当前 content script，
+    // 必须先把 currentGreetUrl / greetStatus=opening / index 持久化，再执行导航；
+    // 否则页面可能在状态落盘前刷新，导致 currentGreetUrl 丢失、状态仍 pending、同一岗位被重开。
+    this.state.currentGreetUrl = url;
+    this.state.greetStatus = { ...this.state.greetStatus, [url]: nextGreetStatus("pending", "opened") };
+    this.state = bumpState({ ...this.state, error: "", lastDecision: `open_approved_job: ${url}` }, nowIso());
+    this.persist();
+    await this.persistRecovery();
     try {
       if (this.tools.navigateToUrl) {
         await this.tools.navigateToUrl(url);
@@ -250,12 +262,6 @@ export class AgentRunner {
       const reason = error instanceof Error ? error.message : String(error);
       return await this.failCurrentJob(url, `导航失败：${reason}`);
     }
-    // 成功导航 → pending→opened→opening；页面将重载，新页面的 content 会 resume 继续 LLM 单步。
-    this.state.currentGreetUrl = url;
-    this.state.greetStatus = { ...this.state.greetStatus, [url]: nextGreetStatus("pending", "opened") };
-    this.state = bumpState({ ...this.state, error: "", lastDecision: `open_approved_job: ${url}` }, nowIso());
-    this.persist();
-    await this.persistRecovery();
     await this.setStatus(true, `已打开岗位 ${url}，进入沟通`, "greeting");
     // 导航会销毁当前 content 上下文；交由新页面 resume，这里暂停。
     return { handled: true, pause: true };
