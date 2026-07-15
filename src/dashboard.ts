@@ -365,6 +365,46 @@ $("diagSnapshot").addEventListener("click", async () => {
   out.innerHTML = lines.join("\n");
 });
 
+// DOM 探测：采集真实 BOSS 的岗位容器/岗位卡/chip/导航祖先结构（outerHTML 片段），
+// 用于校准 snapshot 的选择器（诊断快照只给文本，这里给结构）。
+$("diagDom").addEventListener("click", async () => {
+  const out = $("diagOutput");
+  out.hidden = false;
+  out.textContent = "正在探测 BOSS DOM 结构…";
+  const tab = await sourceTab();
+  if (!tab?.id) { out.textContent = "未找到 BOSS 标签页"; return; }
+  const r = await tabsMessage<{ url?: string; jobContainer?: Array<{ found: boolean; sel: string; tag?: string; cls?: string; childCount?: number; outer?: string }>; jobCard?: Array<{ found: boolean; sel: string; tag?: string; cls?: string; outer?: string }>; chipProbe?: Array<{ found: boolean; sel: string; outer?: string }>; nav?: { tag?: string; cls?: string; outer?: string; ancestors?: string[] } | null; error?: string }>(tab.id, { type: "GET_DIAG_DOM" });
+  if (r?.error) { out.textContent = `探测出错：${r.error}`; return; }
+  if (!r) { out.textContent = "content script 未响应（重载扩展？）"; return; }
+  const esc2 = (s: string) => esc(s).replaceAll("\n", " ");
+  const lines: string[] = [`URL：${r.url || ""}`];
+  const section = (title: string, items: typeof r.jobContainer | undefined) => {
+    lines.push("", title);
+    if (!items) { lines.push("（无）"); return; }
+    for (const it of items) {
+      if (!it.found) { lines.push(`  ✗ ${it.sel}`); continue; }
+      lines.push(`  ✓ ${it.sel}  tag=${it.tag} cls="${esc2(it.cls || "")}" children=${it.childCount ?? "?"}`);
+    }
+  };
+  section("=== 岗位容器候选 ===", r.jobContainer);
+  section("=== 岗位卡候选 ===", r.jobCard);
+  section("=== chip 候选 ===", r.chipProbe);
+  lines.push("", "=== “首页”导航祖先链 ===");
+  if (r.nav) {
+    lines.push(`节点：${r.nav.tag}.${esc2(r.nav.cls || "")}  outer=${esc2(r.nav.outer || "")}`);
+    for (const a of r.nav.ancestors || []) lines.push(`  ↑ ${esc2(a)}`);
+  } else { lines.push("（未找到“首页”链接）"); }
+  // 命中的容器/卡各取第一个 outerHTML 样本
+  const firstFound = (arr: typeof r.jobContainer | undefined) => arr?.find(x => x.found);
+  const jc = firstFound(r.jobContainer); const jcard = firstFound(r.jobCard); const chip = firstFound(r.chipProbe);
+  lines.push("", "=== outerHTML 样本（前 400 字，贴回给我）===");
+  if (jc?.outer) lines.push(`[岗位容器 ${jc.sel}]`, esc2(jc.outer));
+  if (jcard?.outer) lines.push(`[岗位卡 ${jcard.sel}]`, esc2(jcard.outer));
+  if (chip?.outer) lines.push(`[chip ${chip.sel}]`, esc2(chip.outer));
+  if (!jc && !jcard && !chip) lines.push("（以上候选均未命中——需要你贴一段岗位区域的 HTML）");
+  out.innerHTML = lines.join("\n");
+});
+
 for (const [id, kind] of [["approveAction", "approve"], ["rejectAction", "reject"]] as const) {
   $(id).addEventListener("click", async () => {
     const approvalId = ($(id) as HTMLButtonElement).dataset.approvalId;
