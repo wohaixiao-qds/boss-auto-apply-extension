@@ -43,3 +43,6 @@ button:hover { filter:brightness(.97); }
 @media (min-width:1024px) {
   main { padding:2rem 1.5rem; }
 }
+.test-status { margin-left:.6rem; font-size:.82rem; color:var(--muted); }
+.test-status.ok { color: var(--green); }
+.test-status.err { color:#b91c1c; }
