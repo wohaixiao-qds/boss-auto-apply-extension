@@ -1,5 +1,5 @@
 import { AgentRunner } from "./agent/workflow";
-import { snapshotPage, resolveRef } from "./agent/snapshot";
+import { snapshotPage, resolveRef, classifyChip } from "./agent/snapshot";
 import { executeBrowserAction } from "./agent/browser-action";
 import { validateDecision } from "./agent/validate";
 import { buildAgentIntent } from "./agent/intent";
@@ -295,6 +295,41 @@ chrome.runtime.onMessage.addListener((message: any, _sender, sendResponse) => {
     } catch (error) {
       sendResponse({ error: error instanceof Error ? error.message : String(error) });
     }
+    return true;
+  }
+  if (message.type === "COLLECT_FILTER_OPTIONS") {
+    // 自动采集 BOSS 筛选下拉的真实选项：逐个 hover 每个筛选 chip → 抓取面板选项 → 移走关闭 → 下一个。
+    // 全程由 content script 在页面内驱动，不依赖用户手动打开（BOSS 下拉 hover 移出即消失）。
+    (async () => {
+      try {
+        const snap = snapshotPage();
+        const chips = snap.elements
+          .map(e => ({ el: resolveRef(e.id), dim: classifyChip(e.text), text: e.text }))
+          .filter(c => c.el && c.dim) as Array<{ el: HTMLElement; dim: string; text: string }>;
+        const hover = (el: HTMLElement, enter: boolean) => {
+          const fire = (type: string) => el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, relatedTarget: enter ? null : el }));
+          if (enter) { fire("mouseenter"); fire("mouseover"); fire("mousemove"); }
+          else { fire("mouseout"); fire("mouseleave"); }
+        };
+        const grab = () => [...document.querySelectorAll<HTMLElement>("[role='option'], [role='menuitemcheckbox'], [class*='filter-option'], [class*='dropdown-item'], [class*='select-item'], li[aria-selected], [class*='multiple'] li")]
+          .filter(el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
+          .map(el => ({ text: (el.innerText || el.textContent || "").trim(), selected: el.getAttribute("aria-selected") === "true" || el.getAttribute("aria-checked") === "true" || el.classList.contains("selected") || el.classList.contains("active") || el.classList.contains("chosen") }))
+          .filter(o => o.text);
+        const result: Record<string, Array<{ text: string; selected: boolean }>> = {};
+        for (const c of chips) {
+          hover(c.el, true);
+          await new Promise<void>(r => setTimeout(r, 450));
+          const opts = grab();
+          if (opts.length) result[c.dim] = opts;
+          hover(c.el, false);
+          await new Promise<void>(r => setTimeout(r, 250));
+        }
+        await chrome.storage.local.set({ filterOptions: result, filterOptionsAt: new Date().toISOString() });
+        sendResponse({ ok: true, dims: Object.keys(result), options: result });
+      } catch (error) {
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      }
+    })();
     return true;
   }
   if (message.type === "PING") {

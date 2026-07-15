@@ -421,6 +421,25 @@ $("diagDom").addEventListener("click", async () => {
   out.innerHTML = lines.join("\n");
 });
 
+// 自动采集 BOSS 筛选下拉的真实选项（content script 自己 hover 每个筛选 chip，
+// 抓选项后关闭）。结果存 chrome.storage.filterOptions，后续用于把设置页改成"从选项里选"。
+$("collectOptions").addEventListener("click", async () => {
+  const out = $("diagOutput");
+  out.hidden = false;
+  out.textContent = "正在自动 hover 每个筛选并采集选项（请勿操作 BOSS 页面）…";
+  const tab = await sourceTab();
+  if (!tab?.id) { out.textContent = "未找到 BOSS 标签页"; return; }
+  const r = await tabsMessage<{ ok?: boolean; dims?: string[]; options?: Record<string, Array<{ text: string; selected: boolean }>>; error?: string }>(tab.id, { type: "COLLECT_FILTER_OPTIONS" });
+  if (!r?.ok) { out.textContent = `采集失败：${r?.error || "content script 未响应（重载扩展+刷新 BOSS 页）"}`; return; }
+  const lines: string[] = [`已采集 ${r.dims?.length || 0} 个维度的选项（已存入 storage.filterOptions）`];
+  const dimName: Record<string, string> = { salary: "薪资", jobTypes: "求职类型", experience: "经验", education: "学历", industries: "行业", companySizes: "规模", location: "城市" };
+  for (const [dim, opts] of Object.entries(r.options || {})) {
+    lines.push("", `${dimName[dim] || dim}（${opts.length}）：`);
+    for (const o of opts) lines.push(`  ${o.selected ? "☑" : "☐"} ${esc(o.text)}`);
+  }
+  out.innerHTML = lines.join("\n");
+});
+
 for (const [id, kind] of [["approveAction", "approve"], ["rejectAction", "reject"]] as const) {
   $(id).addEventListener("click", async () => {
     const approvalId = ($(id) as HTMLButtonElement).dataset.approvalId;
