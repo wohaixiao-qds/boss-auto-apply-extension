@@ -150,15 +150,14 @@ function renderAgentContext(context: AgentContextSnapshot | null, status: Bootst
   $("lastDecision").textContent = status?.state?.lastDecision || "尚未开始观察";
   const nextLabels: Record<string, string> = {
     idle: "观察当前页面",
-    find_profile: "寻找简历入口",
-    read_profile: "读取简历内容",
-    analyze_profile: "分析简历求职意向",
     find_jobs: "进入职位列表页",
     apply_filters: "把目标条件写入 BOSS 查询控件",
     extract_jobs: "读取岗位并自动翻页",
     filter_jobs: "按意图约束筛除不符合岗位",
     rank_jobs: "计算匹配度并排序",
+    awaiting_approval: "等待你确认打招呼名单",
     awaiting_input: "等待补充岗位目标",
+    greeting: "按批准名单逐个打招呼",
     done: "展示最终岗位结果",
     failed: "等待处理失败原因"
   };
@@ -202,8 +201,40 @@ function renderApproval(approval: ApprovalRequest | null): void {
   card.style.display = "block";
   $("approvalAction").textContent = approval.action;
   $("approvalDescription").textContent = `${approval.title}：${approval.description}`;
+  const jobsBody = $("approvalJobs");
+  const jobs = approval.jobs || [];
+  jobsBody.innerHTML = jobs.length
+    ? jobs.map(job => `<label class="approval-job"><input type="checkbox" data-url="${esc(job.url)}" checked /><span class="score">${esc(job.score)} 分</span><span class="company">${esc(job.company)}</span><span class="title">${esc(job.title)}</span><span class="reason">${esc(job.reason || job.matchedKeywords.join("、") || "")}</span></label>`).join("")
+    : `<p class="empty-cell">没有待审批的岗位</p>`;
   ($("approveAction") as HTMLButtonElement).dataset.approvalId = approval.id;
   ($("rejectAction") as HTMLButtonElement).dataset.approvalId = approval.id;
+}
+
+function renderUnknown(status: BootstrapStatus | null): void {
+  const card = $("unknownCard");
+  const greetStatus = status?.state?.greetStatus || {};
+  const ranked = status?.state?.lastRankedJobs || [];
+  const rankedByUrl = new Map(ranked.map(job => [job.url, job]));
+  const unknownUrls = Object.entries(greetStatus).filter(([, s]) => s === "unknown").map(([url]) => url);
+  if (!unknownUrls.length) {
+    card.style.display = "none";
+    $("unknownBody").innerHTML = "";
+    return;
+  }
+  card.style.display = "block";
+  $("unknownBody").innerHTML = unknownUrls.map(url => {
+    const job = rankedByUrl.get(url);
+    const label = job ? `${esc(job.company)} · ${esc(job.title)}` : esc(url);
+    return `<div class="unknown-row" data-url="${esc(url)}"><span class="unknown-label">${label}</span><button class="secondary" data-verdict="sent">已发送</button><button class="danger" data-verdict="skipped">未发送，跳过</button></div>`;
+  }).join("");
+}
+
+function renderCostReadout(status: BootstrapStatus | null): void {
+  const state = status?.state;
+  if (!state) { $("costReadout").textContent = ""; return; }
+  const phaseLabel = state.phase === "greet" ? "打招呼阶段" : state.phase === "screen" ? "筛选阶段" : "";
+  const cost = Number(state.costYuan || 0).toFixed(2);
+  $("costReadout").textContent = `${phaseLabel} · 已花费 ¥${cost}`;
 }
 
 async function refresh(): Promise<void> {
@@ -217,6 +248,8 @@ async function refresh(): Promise<void> {
   if (results?.lastScanResults) renderJobs(results.lastScanResults);
   renderAgentStatus(status);
   renderProgress(status);
+  renderCostReadout(status);
+  renderUnknown(status);
   const tab = await sourceTab();
   const context = tab?.id ? await tabsMessage<AgentContextSnapshot>(tab.id, { type: "GET_AGENT_CONTEXT" }) : null;
   renderAgentContext(context, status);
@@ -277,15 +310,30 @@ $("clearData").addEventListener("click", async () => {
   await refresh();
 });
 $("settings").addEventListener("click", () => void chrome.runtime.openOptionsPage());
-for (const [id, status] of [["approveAction", "approved"], ["rejectAction", "rejected"]] as const) {
+for (const [id, kind] of [["approveAction", "approve"], ["rejectAction", "reject"]] as const) {
   $(id).addEventListener("click", async () => {
     const approvalId = ($(id) as HTMLButtonElement).dataset.approvalId;
     if (!approvalId) return;
-    const result = await runtimeMessage<{ ok: boolean; error?: string }>({ type: "RESOLVE_APPROVAL", id: approvalId, status });
-    setNotice(result?.ok ? (status === "approved" ? "已批准 Agent 动作" : "已拒绝 Agent 动作") : result?.error || "确认请求已失效", !result?.ok);
+    const selectedUrls = kind === "approve"
+      ? Array.from(document.querySelectorAll<HTMLInputElement>("#approvalJobs input[type=checkbox]:checked")).map(box => box.dataset.url || "").filter(Boolean)
+      : [];
+    const result = await runtimeMessage<{ ok: boolean; error?: string }>({ type: "RESOLVE_APPROVAL", id: approvalId, selectedUrls });
+    setNotice(result?.ok ? (kind === "approve" && selectedUrls.length ? `已批准 ${selectedUrls.length} 个岗位并打招呼` : "已拒绝打招呼") : result?.error || "确认请求已失效", !result?.ok);
     await refresh();
   });
 }
+
+$("unknownBody").addEventListener("click", async (event) => {
+  const button = event.target as HTMLButtonElement;
+  if (button?.dataset?.verdict !== "sent" && button?.dataset?.verdict !== "skipped") return;
+  const row = button.closest(".unknown-row") as HTMLElement | null;
+  const url = row?.dataset.url || "";
+  if (!url) return;
+  button.disabled = true;
+  const result = await runtimeMessage<{ ok: boolean; error?: string }>({ type: "RESOLVE_UNKNOWN_GREET", url, verdict: button.dataset.verdict as "sent" | "skipped" });
+  setNotice(result?.ok ? (button.dataset.verdict === "sent" ? "已记录为发送" : "已跳过") : result?.error || "处理失败", !result?.ok);
+  await refresh();
+});
 
 async function init(): Promise<void> {
   await refresh();

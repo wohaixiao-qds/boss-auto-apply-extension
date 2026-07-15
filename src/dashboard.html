@@ -7,7 +7,7 @@
     <link rel="stylesheet" href="dashboard.css" />
   </head>
   <body>
-    <header class="topbar"><div><div class="eyebrow">BOSS 求职助手</div><h1>求职 Agent</h1></div><div id="status" class="status-pill idle">待启动</div></header>
+    <header class="topbar"><div><div class="eyebrow">BOSS 求职助手</div><h1>求职 Agent</h1></div><div id="status" class="status-pill idle">待启动</div><span id="costReadout" class="cost-readout"></span></header>
     <main class="shell">
       <section class="toolbar card">
         <button id="bootstrap" class="primary">开始智能筛选</button>
@@ -54,8 +54,14 @@
       <section id="approvalCard" class="card" style="display:none">
         <div class="section-title"><h2>需要你的确认</h2><span id="approvalAction"></span></div>
         <p id="approvalDescription"></p>
-        <button id="approveAction" class="primary">批准</button>
+        <div id="approvalJobs" class="approval-jobs"></div>
+        <button id="approveAction" class="primary">批准并打招呼</button>
         <button id="rejectAction" class="danger">拒绝</button>
+      </section>
+
+      <section id="unknownCard" class="card" style="display:none">
+        <div class="section-title"><h2>打招呼状态未识别</h2><span>请确认是否已发送</span></div>
+        <div id="unknownBody"></div>
       </section>
 
       <section class="card profile-card">

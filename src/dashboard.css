@@ -21,3 +21,13 @@ body.embedded .topbar { padding:.8rem 1.1rem; } body.embedded .eyebrow { display
 @media (min-width:640px) { .notice { width:auto; margin-left:auto; } .toolbar button { flex:0 1 auto; } }
 @media (min-width:768px) { .shell { padding:0 1rem; } .agent-overview { grid-template-columns:minmax(0,1.2fr) minmax(0,.8fr); }.query-grid { grid-template-columns:minmax(0,1fr) auto minmax(0,1fr); }.query-arrow { display:block; } }
 @media (min-width:1024px) { .agent-overview { gap:1rem; }.card { padding:1.1rem; } }
+
+.cost-readout { color:#93c5fd; font-size:.8rem; }
+.approval-jobs { display:flex; flex-direction:column; gap:.4rem; margin-bottom:.75rem; }
+.approval-job { display:flex; align-items:center; gap:.5rem; padding:.5rem .6rem; border:1px solid var(--line); border-radius:.5rem; background:#f8fafc; font-size:.85rem; flex-wrap:wrap; }
+.approval-job .score { color:#15803d; font-weight:700; }
+.approval-job .company { font-weight:600; }
+.approval-job .reason { color:var(--muted); font-size:.78rem; flex-basis:100%; }
+.unknown-row { display:flex; align-items:center; gap:.5rem; padding:.5rem .6rem; border:1px solid var(--line); border-radius:.5rem; background:#fff7ed; margin-bottom:.4rem; flex-wrap:wrap; }
+.unknown-row .unknown-label { flex:1; min-width:0; color:#9a3412; font-size:.85rem; word-break:break-all; }
+.unknown-row button { min-height:34px; padding:.35rem .6rem; font-size:.8rem; }
