@@ -3,7 +3,6 @@ import type { AgentIntent, ApprovalRequest, BootstrapStatus, BossQueryContext, J
 if (new URLSearchParams(location.search).has("embedded")) document.body.classList.add("embedded");
 let sourceTabId = Number(new URLSearchParams(location.search).get("tabId")) || null;
 let dead = false;
-let autoTriggered = false;
 let collectListening = false;
 
 interface AgentContextSnapshot {
@@ -480,9 +479,8 @@ $("unknownBody").addEventListener("click", async (event) => {
 });
 
 async function init(): Promise<void> {
+  // 不自动启动 Agent——由用户手动点「开始智能筛选」。避免一打开侧栏就自动跑。
   await refresh();
-  const settings = await runtimeMessage<Settings>({ type: "GET_SETTINGS" });
-  if (settings?.agentAutoStart && !autoTriggered) { autoTriggered = true; setTimeout(() => void bootstrap(false), 400); }
 }
 
 void init();
