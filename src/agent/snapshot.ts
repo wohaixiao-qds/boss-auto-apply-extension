@@ -40,11 +40,10 @@ const snapshotRefs = new Map<string, HTMLElement>();
 export function resetSnapshotRefs(): void { snapshotRefs.clear(); }
 
 const isVisibleEl = (el: Element): boolean => {
-  // jsdom 不执行布局，getBoundingClientRect 恒为 0、display 可能返回空串；
-  // 仅以显式隐藏信号（display:none / visibility:hidden）作为不可见判定，
-  // 这样在 jsdom 与真实浏览器下都行为一致。
-  const cs = getComputedStyle(el);
-  return cs.display !== "none" && cs.visibility !== "hidden";
+  // 真实浏览器下，BOSS 常用 max-height:0/height:0 折叠下拉面板（而非 display:none），
+  // 必须用 width/height>0 的几何门槛排除这些隐藏元素，避免污染快照预算与向 LLM 暴露幽灵 ref。
+  const r = el.getBoundingClientRect();
+  return Boolean(r && r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== "hidden");
 };
 const textOf = (n: Element | null): string => {
   if (!n) return "";

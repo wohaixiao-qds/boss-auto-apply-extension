@@ -1,9 +1,18 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { snapshotPage, resolveRef, resetSnapshotRefs } from "../../src/agent/snapshot";
 
 beforeEach(() => {
   document.body.innerHTML = "";
   resetSnapshotRefs();
+  // jsdom 不执行布局，getBoundingClientRect 恒为 0×0，会触发真实浏览器下的可见性几何门槛，
+  // 这里仅在测试桩中返回非零 rect，让 fixture 元素被视为可见；不影响生产代码。
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(
+    { width: 10, height: 10, top: 0, left: 0, right: 10, bottom: 10, x: 0, y: 0, toJSON: () => ({}) } as DOMRect
+  );
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 describe("snapshotPage", () => {
