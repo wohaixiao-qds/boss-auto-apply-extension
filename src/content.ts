@@ -8,6 +8,20 @@ import type { AgentActionResult, AgentDecision, AgentTools, Job, RuntimeAction, 
 let contextDead = false;
 let listenTimer: ReturnType<typeof setInterval> | null = null;
 let listenBatches: string[][] = [];
+let listenBaseSet: Set<string> = new Set();
+
+// 抓所有"可见叶子元素"的签名（不依赖固定选项选择器）。
+// 监听开始时建基线；用户 hover 打开下拉后，新出现的叶子 = 选项，不管它们什么 class/role。
+function grabVisibleLeaves(): Array<{ sig: string; text: string }> {
+  return [...document.querySelectorAll<HTMLElement>("a, button, li, span, div, p, label, [role='option'], [role='menuitem'], [role='menuitemcheckbox']")]
+    .filter(el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== "hidden"; })
+    .filter(el => el.childElementCount === 0 || el.tagName === "LI" || el.tagName === "OPTION" || el.tagName === "A" || el.tagName === "BUTTON")
+    .map(el => {
+      const text = (el.innerText || el.textContent || "").trim().replace(/\s+/g, " ").slice(0, 40);
+      return { sig: `${text}|${el.tagName}|${(el.className?.toString?.() || "").slice(0, 24)}`, text };
+    })
+    .filter(x => x.text);
+}
 
 async function runtimeMessage<T = any>(message: unknown): Promise<T | null> {
   if (contextDead) return null;
@@ -304,17 +318,16 @@ chrome.runtime.onMessage.addListener((message: any, _sender, sendResponse) => {
     // content script 每 400ms 抓取当前可见的选项，按"选项文本集合"去重记为一批。
     if (message.action === "start") {
       if (listenTimer) clearInterval(listenTimer);
+      // 建基线：当前所有可见叶子元素签名。用户随后 hover 打开下拉，新出现的叶子即选项。
+      listenBaseSet = new Set(grabVisibleLeaves().map(x => x.sig));
       listenBatches = [];
-      const OPT = "[role='option'], [role='menuitemcheckbox'], [class*='filter-option'], [class*='dropdown-item'], [class*='select-item'], li[aria-selected], [class*='multiple'] li";
       listenTimer = setInterval(() => {
-        const opts = [...document.querySelectorAll<HTMLElement>(OPT)]
-          .filter(el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
-          .map(el => (el.innerText || el.textContent || "").trim())
-          .filter(Boolean);
-        if (!opts.length) return;
-        const key = opts.slice().sort().join("|");
+        const fresh = grabVisibleLeaves().filter(x => !listenBaseSet.has(x.sig)).map(x => x.text);
+        // 至少 2 个新叶子才算"下拉打开了"（避免单个动态元素误判）
+        if (fresh.length < 2) return;
+        const key = fresh.slice().sort().join("|");
         const last = listenBatches[listenBatches.length - 1];
-        if (!last || last.slice().sort().join("|") !== key) listenBatches.push(opts);
+        if (!last || last.slice().sort().join("|") !== key) listenBatches.push(fresh);
       }, 400);
       sendResponse({ ok: true });
     } else {
