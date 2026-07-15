@@ -347,10 +347,12 @@ async function planAgentAction(payload: unknown): Promise<{ ok: boolean; decisio
     });
     const decision = validAgentDecision(parseJson(data?.choices?.[0]?.message?.content));
     const rawUsage = data?.usage as { prompt_tokens?: number; completion_tokens?: number } | undefined;
-    const prev = await chrome.storage.local.get({ agentRunCost: {} as Record<string, CostAccum> }) as { agentRunCost: Record<string, CostAccum> };
-    const prevAccum = prev.agentRunCost[runId] || { tokensUsed: 0, costYuan: 0 };
+    const prev = await chrome.storage.local.get({ agentRunCost: {} as Record<string, CostAccum> }) as { agentRunCost: Record<string, CostAccum> | null };
+    // CLEAR 会把 agentRunCost 设为 null（key 存在但值 null，get 默认值不生效）；这里必须防 null。
+    const prevCostMap: Record<string, CostAccum> = prev.agentRunCost || {};
+    const prevAccum = prevCostMap[runId] || { tokensUsed: 0, costYuan: 0 };
     const cost = accumulateCost(prevAccum, rawUsage?.prompt_tokens || 0, rawUsage?.completion_tokens || 0, settings, { estInputChars: JSON.stringify(payload).length, estOutputChars: String(data?.choices?.[0]?.message?.content || "").length });
-    const nextCost: Record<string, CostAccum> = { ...prev.agentRunCost, [runId]: { tokensUsed: cost.tokensUsed, costYuan: cost.costYuan } };
+    const nextCost: Record<string, CostAccum> = { ...prevCostMap, [runId]: { tokensUsed: cost.tokensUsed, costYuan: cost.costYuan } };
     await chrome.storage.local.set({ agentRunCost: nextCost });
     const usage: AgentUsage = { tokensIn: cost.tokensIn, tokensOut: cost.tokensOut, cumulativeYuan: cost.cumulativeYuan, estimated: cost.estimated };
     return { ok: true, decision, usage };
