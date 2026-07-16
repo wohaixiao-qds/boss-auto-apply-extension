@@ -441,16 +441,16 @@ $("collectOptions").addEventListener("click", async () => {
     document.getElementById("collectOptions")!.textContent = "■ 结束监听";
     out.innerHTML = "监听中…请在 BOSS 页面依次 <b>hover 打开每个筛选下拉</b>（薪资/经验/学历/求职类型/行业/规模，每个停 1 秒）。<br>全部打开后回来点「结束监听」。";
   } else {
-    const r = await tabsMessage<{ ok?: boolean; batches?: string[][] }>(tab.id, { type: "COLLECT_OPTIONS_LISTEN", action: "stop" });
+    const r = await tabsMessage<{ ok?: boolean; batches?: Array<Array<{ text: string; code: string }>> }>(tab.id, { type: "COLLECT_OPTIONS_LISTEN", action: "stop" });
     collectListening = false;
     document.getElementById("collectOptions")!.textContent = "采集筛选选项";
     if (!r?.ok) { out.textContent = "结束失败"; return; }
     const batches = r.batches || [];
     if (!batches.length) { out.innerHTML = "未抓到任何选项。请确认：监听期间确实 hover 打开了下拉（面板展开了），且选项是 li/[role=option] 结构。"; return; }
-    const lines: string[] = [`抓到 ${batches.length} 批选项（请贴回给我，我会映射到各维度）：`];
-    batches.forEach((b, i) => {
+    const lines: string[] = [`抓到 ${batches.length} 批选项（请按 hover 顺序贴回：薪资→求职类型→经验→学历→规模→行业）：`];
+    batches.forEach((b: Array<{ text: string; code: string }>, i: number) => {
       lines.push("", `【批次 ${i + 1}】（${b.length} 个）：`);
-      for (const x of b) lines.push("  " + esc(x));
+      for (const x of b) lines.push(`  ${esc(x.text)}  →  ${esc(x.code || "（无码）")}`);
     });
     out.innerHTML = lines.join("\n");
   }

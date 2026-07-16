@@ -7,18 +7,21 @@ import type { AgentActionResult, AgentDecision, AgentTools, Job, RuntimeAction, 
 
 let contextDead = false;
 let listenTimer: ReturnType<typeof setInterval> | null = null;
-let listenBatches: string[][] = [];
+let listenBatches: Array<Array<{ text: string; code: string }>> = [];
 let listenBaseSet: Set<string> = new Set();
 
 // 抓所有"可见叶子元素"的签名（不依赖固定选项选择器）。
 // 监听开始时建基线；用户 hover 打开下拉后，新出现的叶子 = 选项，不管它们什么 class/role。
-function grabVisibleLeaves(): Array<{ sig: string; text: string }> {
-  return [...document.querySelectorAll<HTMLElement>("a, button, li, span, div, p, label, [role='option'], [role='menuitem'], [role='menuitemcheckbox']")]
+function grabVisibleLeaves(): Array<{ sig: string; text: string; code: string }> {
+  return [...document.querySelectorAll<HTMLElement>("a, button, li, span, div, p, label, [role='option'], [role='menuitem'], [role='menuitemcheckbox'], [data-val], [data-value]")]
     .filter(el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== "hidden"; })
-    .filter(el => el.childElementCount === 0 || el.tagName === "LI" || el.tagName === "OPTION" || el.tagName === "A" || el.tagName === "BUTTON")
+    .filter(el => el.childElementCount === 0 || el.tagName === "LI" || el.tagName === "OPTION" || el.tagName === "A" || el.tagName === "BUTTON" || el.hasAttribute("data-val") || el.hasAttribute("data-value"))
     .map(el => {
       const text = (el.innerText || el.textContent || "").trim().replace(/\s+/g, " ").slice(0, 40);
-      return { sig: `${text}|${el.tagName}|${(el.className?.toString?.() || "").slice(0, 24)}`, text };
+      // 码在选项自身或最近 li/option/[data-val] 容器上
+      const holder = el.closest("li, [role='option'], [data-val], [data-value]") || el;
+      const code = el.dataset.val || el.dataset.value || el.getAttribute("value") || holder?.getAttribute("data-val") || holder?.getAttribute("data-value") || holder?.getAttribute("value") || "";
+      return { sig: `${text}|${el.tagName}|${(el.className?.toString?.() || "").slice(0, 24)}`, text, code: String(code || "") };
     })
     .filter(x => x.text);
 }
@@ -322,19 +325,22 @@ chrome.runtime.onMessage.addListener((message: any, _sender, sendResponse) => {
       listenBaseSet = new Set(grabVisibleLeaves().map(x => x.sig));
       listenBatches = [];
       listenTimer = setInterval(() => {
-        const fresh = grabVisibleLeaves().filter(x => !listenBaseSet.has(x.sig)).map(x => x.text);
-        // 至少 2 个新叶子才算"下拉打开了"（避免单个动态元素误判）
+        const fresh = grabVisibleLeaves().filter(x => !listenBaseSet.has(x.sig));
         if (fresh.length < 2) return;
-        const key = fresh.slice().sort().join("|");
+        const key = fresh.map(x => x.sig).slice().sort().join("|");
         const last = listenBatches[listenBatches.length - 1];
-        if (!last || last.slice().sort().join("|") !== key) listenBatches.push(fresh);
+        if (!last || last.map(x => x.text).slice().sort().join("|") !== fresh.map(x => x.text).slice().sort().join("|")) {
+          const seen = new Set<string>();
+          const items = fresh.map(x => ({ text: x.text, code: x.code })).filter(it => { if (seen.has(it.text)) return false; seen.add(it.text); return true; });
+          listenBatches.push(items);
+        }
       }, 400);
       sendResponse({ ok: true });
     } else {
       if (listenTimer) { clearInterval(listenTimer); listenTimer = null; }
       const seen = new Set<string>();
-      const dedup: string[][] = [];
-      for (const b of listenBatches) { const k = b.slice().sort().join("|"); if (!seen.has(k)) { seen.add(k); dedup.push(b); } }
+      const dedup: Array<Array<{ text: string; code: string }>> = [];
+      for (const b of listenBatches) { const k = b.map(x => x.text).slice().sort().join("|"); if (!seen.has(k)) { seen.add(k); dedup.push(b); } }
       sendResponse({ ok: true, batches: dedup });
     }
     return true;
