@@ -486,5 +486,21 @@ async function init(): Promise<void> {
   await refresh();
 }
 
+$("collectDimBtn").addEventListener("click", async () => {
+  const dimName: Record<string, string> = { jobTypes: "求职类型", targetSalary: "薪资", workExperience: "经验", education: "学历", companySizes: "规模", companyIndustries: "行业" };
+  const dim = (document.getElementById("collectDim") as HTMLSelectElement).value;
+  const out = $("diagOutput");
+  out.hidden = false;
+  out.textContent = `8 秒内请在 BOSS hover 打开「${dimName[dim] || dim}」下拉并保持展开…`;
+  const tab = await sourceTab();
+  if (!tab?.id) { out.textContent = "未找到 BOSS 标签页"; return; }
+  const r = await tabsMessage<{ ok?: boolean; items?: Array<{ text: string; code: string; tag?: string; cls?: string }>; error?: string }>(tab.id, { type: "COLLECT_DIM_CODES", dim });
+  if (!r?.ok) { out.textContent = `采集失败：${r?.error || "未响应（重载扩展+刷新）"}`; return; }
+  const lines = [`【${dimName[dim] || dim}】采到 ${r.items?.length || 0} 个：`];
+  for (const it of r.items || []) lines.push(`  ${it.text}  →  ${it.code || "（无码）"}  <${it.tag} .${it.cls || ""}>`);
+  out.textContent = lines.join("\n");
+  if (r.items?.length) await chrome.storage.local.set({ [`filterCodes_${dim}`]: r.items });
+});
+
 void init();
 setInterval(() => void refresh().catch(() => undefined), 1500);

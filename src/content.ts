@@ -341,6 +341,32 @@ chrome.runtime.onMessage.addListener((message: any, _sender, sendResponse) => {
   }
 
 
+  if (message.type === "COLLECT_DIM_CODES") {
+    // 逐维度采集：用户点维度后 hover 对应下拉，读出所有选项的 {文本, 码}。
+    // 码可能在选项元素自身或最近 li/option 容器的 data-val/data-value/value。
+    const dim = String(message.dim || "");
+    const grabOpts = () => [...document.querySelectorAll<HTMLElement>("a, button, li, span, div, p, label, [role='option'], [data-val], [data-value]")]
+      .filter(el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
+      .filter(el => el.childElementCount === 0 || el.tagName === "LI" || el.tagName === "OPTION" || el.tagName === "A" || el.tagName === "BUTTON" || el.hasAttribute("data-val") || el.hasAttribute("data-value"))
+      .map(el => ({ sig: `${(el.innerText || el.textContent || "").trim().slice(0, 40)}|${el.tagName}|${(el.className?.toString?.() || "").slice(0, 24)}`, el, text: (el.innerText || el.textContent || "").trim().replace(/\s+/g, " ").slice(0, 40) }))
+      .filter(x => x.text);
+    const baseSet = new Set(grabOpts().map(x => x.sig));
+    let done = false;
+    const finish = (resp: unknown) => { if (done) return; done = true; clearInterval(timer); clearTimeout(timeout); sendResponse(resp); };
+    const timer = setInterval(() => {
+      const fresh = grabOpts().filter(x => !baseSet.has(x.sig));
+      if (fresh.length < 2) return;
+      const seen = new Set<string>();
+      const items = fresh.map(x => {
+        const holder = x.el.closest("li, [role='option'], [data-val], [data-value]") || x.el;
+        const code = x.el.dataset.val || x.el.dataset.value || x.el.getAttribute("value") || holder?.getAttribute("data-val") || holder?.getAttribute("data-value") || holder?.getAttribute("value") || "";
+        return { text: x.text, code: String(code || ""), tag: x.el.tagName, cls: (x.el.className?.toString?.() || "").slice(0, 40) };
+      }).filter(it => { if (seen.has(it.text)) return false; seen.add(it.text); return true; });
+      finish({ ok: true, dim, items });
+    }, 400);
+    const timeout = setTimeout(() => finish({ ok: false, error: "8 秒内未抓到选项，请确认 hover 打开了对应下拉" }), 9000);
+    return true;
+  }
   if (message.type === "PING") {
     sendResponse({ ok: true, page: location.href });
     return false;

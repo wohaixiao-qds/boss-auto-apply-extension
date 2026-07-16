@@ -18,6 +18,15 @@
         <button id="diagSnapshot" class="secondary">诊断快照</button>
         <button id="diagDom" class="secondary">DOM 探测</button>
         <button id="collectOptions" class="secondary">采集筛选选项</button>
+        <select id="collectDim" class="dim-select">
+          <option value="jobTypes">求职类型</option>
+          <option value="targetSalary">薪资</option>
+          <option value="workExperience">经验</option>
+          <option value="education">学历</option>
+          <option value="companySizes">规模</option>
+          <option value="companyIndustries">行业</option>
+        </select>
+        <button id="collectDimBtn" class="secondary">采集该维度码</button>
         <span id="notice" class="notice"></span>
       </section>
       <pre id="diagOutput" class="diag-output" hidden></pre>
