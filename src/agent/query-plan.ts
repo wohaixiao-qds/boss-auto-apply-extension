@@ -1,17 +1,18 @@
 import type { BossQueryContext, EffectiveQuery, Settings } from "../types";
 
 const lines = (value: string): string[] => value.split(/\r?\n|[,，/|]/).map(item => item.trim()).filter(Boolean);
+const constraints = (value: string): string[] => lines(value).filter(item => item !== "不限");
 
 function prefer(userValue: string, currentValue: string[]): string[] {
-  const user = lines(userValue);
+  const user = constraints(userValue);
   return user.length ? user : currentValue;
 }
 
 export function mergeBossQueryWithUser(current: BossQueryContext, settings: Settings): EffectiveQuery {
   const userKeywords = lines(settings.jobKeywords);
-  const userLocations = lines(settings.targetLocations);
-  const userSalary = lines(settings.targetSalary);
-  const userWorkModes = lines(settings.workMode);
+  const userLocations = constraints(settings.targetLocations);
+  const userSalary = constraints(settings.targetSalary);
+  const userWorkModes = constraints(settings.workMode);
   const query: EffectiveQuery = {
     keyword: userKeywords.length ? userKeywords.slice(0, 3).join(" ") : current.keyword,
     location: prefer(settings.targetLocations, current.location),
@@ -35,12 +36,12 @@ export function mergeBossQueryWithUser(current: BossQueryContext, settings: Sett
   const userProvidedMap: Record<string, boolean> = {
     location: userLocations.length > 0,
     salary: userSalary.length > 0,
-    jobTypes: lines(settings.jobTypes).length > 0,
+    jobTypes: constraints(settings.jobTypes).length > 0,
     workModes: userWorkModes.length > 0,
-    experience: lines(settings.workExperience).length > 0,
-    education: lines(settings.education).length > 0,
-    industries: lines(settings.companyIndustries).length > 0,
-    companySizes: lines(settings.companySizes).length > 0
+    experience: constraints(settings.workExperience).length > 0,
+    education: constraints(settings.education).length > 0,
+    industries: constraints(settings.companyIndustries).length > 0,
+    companySizes: constraints(settings.companySizes).length > 0
   };
   for (const [key, label] of dimensions) {
     const userProvided = key === "keyword" ? userKeywords.length > 0 : Boolean(userProvidedMap[key]);

@@ -24,4 +24,22 @@ describe("buildLlmPayload", () => {
     expect(p.page.screen).toBe(serializeSnapshotForLLM(snap));
     expect(p.page.snapshotId).toBe("s1");
   });
+
+  it("hides filter and ordinary job refs from the LLM during greet phase", () => {
+    const phaseSnap: PageSnapshot = {
+      ...snap,
+      elements: [
+        { id: "e1", role: "text", text: "薪资待遇", region: "filter" },
+        { id: "e2", role: "text", text: "AI Agent开发工程师", region: "job" },
+        { id: "e3", role: "btn", text: "立即沟通", region: "job" }
+      ]
+    };
+    const st = newAgentState("r", null, "t");
+    st.phase = "greet";
+    const payload: any = buildLlmPayload({ state: st, intent, snapshot: phaseSnap, currentQuery: snap.currentQuery, effectiveQuery: intent.query });
+    expect(payload.page.screen).toContain("立即沟通");
+    expect(payload.page.screen).not.toContain("薪资待遇");
+    expect(payload.page.screen).not.toContain("AI Agent开发工程师");
+    expect(payload.page.snapshotId).toBe("s1");
+  });
 });

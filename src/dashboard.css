@@ -21,7 +21,7 @@ body.embedded .topbar { padding:.8rem 1.1rem; } body.embedded .eyebrow { display
 @media (min-width:1024px) { .agent-overview { gap:1rem; }.card { padding:1.1rem; } }
 
 .cost-readout { color:#93c5fd; font-size:.8rem; }
-.approval-jobs { display:flex; flex-direction:column; gap:.4rem; margin-bottom:.75rem; }
+.approval-jobs { display:flex; flex-direction:column; gap:.4rem; max-height:min(52vh,34rem); margin-bottom:.75rem; overflow:auto; padding-right:.15rem; }
 .approval-job { display:flex; align-items:center; gap:.5rem; padding:.5rem .6rem; border:1px solid var(--line); border-radius:.5rem; background:#f8fafc; font-size:.85rem; flex-wrap:wrap; }
 .approval-job .score { color:#15803d; font-weight:700; }
 .approval-job .company { font-weight:600; }
@@ -36,3 +36,68 @@ body.embedded .topbar { padding:.8rem 1.1rem; } body.embedded .eyebrow { display
 .decision-log { white-space:pre-wrap; word-break:break-word; font-family:ui-monospace,Menlo,monospace; font-size:.72rem; line-height:1.4; background:#0b1020; color:#cbd5e1; padding:.6rem .7rem; border-radius:.5rem; max-height:240px; overflow:auto; }
 .decision-log:empty::before { content:"（Agent 还没动作）"; color:#64748b; }
 .dim-select { padding:.3rem; font-size:.8rem; border:1px solid var(--line); border-radius:.4rem; }
+
+.workspace-tabs { position:sticky; top:0; z-index:3; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:.45rem; margin-bottom:.75rem; padding:.45rem; border:1px solid var(--line); border-radius:.7rem; background:rgba(244,247,251,.94); box-shadow:0 .2rem .8rem rgba(15,23,42,.06); backdrop-filter:blur(.5rem); }
+.workspace-tab { display:flex; align-items:center; justify-content:center; gap:.35rem; min-width:0; min-height:44px; padding:.5rem .55rem; border:1px solid transparent; border-radius:.5rem; background:transparent; color:var(--muted); font-size:.84rem; font-weight:600; white-space:nowrap; }
+.workspace-tab:hover { background:#eaf1fb; filter:none; }
+.workspace-tab.active { border-color:#bfdbfe; background:#fff; color:#1d4ed8; box-shadow:0 .15rem .45rem rgba(37,99,235,.1); }
+.workspace-tab.needs-attention { border-color:#fbbf24; background:#fffbeb; color:#92400e; }
+.workspace-tab.needs-attention.active { border-color:#f59e0b; background:#fef3c7; }
+.tab-badge { display:inline-flex; align-items:center; justify-content:center; min-width:1.25rem; height:1.25rem; padding:0 .25rem; border-radius:999px; background:#f59e0b; color:#fff; font-size:.7rem; line-height:1; }
+.tab-panel { min-width:0; }
+.tab-panel[hidden] { display:none; }
+.tab-empty { padding:2rem 1rem; text-align:center; }
+.tab-empty .empty-icon { display:grid; place-items:center; width:2.25rem; height:2.25rem; margin:0 auto .6rem; border-radius:50%; background:#dcfce7; color:#15803d; font-weight:700; }
+.tab-empty h2 { font-size:1.05rem; }
+.tab-empty p { margin:.35rem auto 0; max-width:42ch; color:var(--muted); font-size:.875rem; }
+.completion-notice { display:flex; align-items:flex-start; gap:.7rem; margin-bottom:.75rem; padding:.85rem 1rem; border:1px solid #86efac; border-radius:.75rem; background:#f0fdf4; color:#166534; box-shadow:0 .25rem .8rem rgba(22,101,52,.08); }
+.completion-icon { display:grid; place-items:center; flex:0 0 auto; width:1.7rem; height:1.7rem; border-radius:50%; background:#16a34a; color:#fff; font-weight:700; }
+.completion-notice strong { display:block; font-size:.95rem; }
+.completion-notice p { margin:.15rem 0 0; color:#15803d; font-size:.82rem; }
+
+/* Agent 工作台：移动端单列，宽屏再展开，审批节点始终保持高对比度。 */
+.agent-workspace { margin-bottom:.75rem; padding:1rem; border:1px solid #bfdbfe; border-radius:.75rem; background:linear-gradient(145deg,#ffffff 0%,#f8fbff 100%); box-shadow:0 .4rem 1.3rem rgba(37,99,235,.08); }
+.workspace-header { display:flex; align-items:flex-start; justify-content:space-between; gap:.8rem; }
+.workspace-kicker,.approval-kicker { color:#2563eb; font-size:.72rem; font-weight:700; letter-spacing:.08em; text-transform:uppercase; }
+.workspace-header h2 { margin-top:.18rem; font-size:1.15rem; }
+.workspace-message { max-width:65ch; margin:.35rem 0 0; color:var(--muted); font-size:.88rem; }
+.workspace-badge,.approval-badge { display:inline-flex; align-items:center; justify-content:center; flex:0 0 auto; min-height:2rem; padding:.35rem .65rem; border:1px solid #cbd5e1; border-radius:999px; background:#f8fafc; color:#475569; font-size:.78rem; font-weight:700; white-space:nowrap; }
+.workspace-badge.running { border-color:#93c5fd; background:#eff6ff; color:#1d4ed8; }
+.workspace-badge.approval { border-color:#fbbf24; background:#fffbeb; color:#a16207; }
+.workspace-badge.done { border-color:#86efac; background:#f0fdf4; color:#15803d; }
+.workspace-badge.failed { border-color:#fca5a5; background:#fef2f2; color:#b91c1c; }
+.workspace-main { display:grid; grid-template-columns:1fr; gap:.75rem; margin-top:1rem; }
+.workspace-block { min-width:0; padding:.75rem; border:1px solid #e5e7eb; border-radius:.6rem; background:#fff; }
+.workspace-block-title { display:flex; align-items:center; justify-content:space-between; gap:.75rem; margin-bottom:.55rem; color:#334155; font-size:.86rem; font-weight:700; }
+.workspace-block-title span:last-child { color:var(--muted); font-size:.76rem; font-weight:500; text-align:right; }
+.workspace-intent { border-left:3px solid var(--blue); }
+.workspace-decision { border-left:3px solid #8b5cf6; }
+.workspace-metrics { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:.5rem; margin-top:.75rem; }
+.workspace-metric { min-width:0; padding:.65rem .7rem; border:1px solid #e5e7eb; border-radius:.55rem; background:rgba(255,255,255,.75); }
+.workspace-metric span { display:block; overflow:hidden; color:var(--muted); font-size:.74rem; text-overflow:ellipsis; white-space:nowrap; }
+.workspace-metric strong { display:block; overflow:hidden; margin-top:.15rem; color:#172033; font-size:1rem; text-overflow:ellipsis; white-space:nowrap; }
+.approval-card { border:2px solid #f59e0b; background:linear-gradient(145deg,#fffdf5 0%,#ffffff 65%); box-shadow:0 .45rem 1.4rem rgba(245,158,11,.14); }
+.approval-card.is-pending { display:block; }
+.approval-header { display:flex; align-items:flex-start; justify-content:space-between; gap:.8rem; }
+.approval-header h2 { margin-top:.2rem; font-size:1.12rem; }
+.approval-badge { border-color:#fbbf24; background:#fef3c7; color:#92400e; }
+.approval-meta { display:flex; flex-direction:column; gap:.15rem; margin-top:.6rem; color:#92400e; font-size:.82rem; }
+.approval-meta span:last-child { color:#78350f; }
+.approval-summary { margin:.8rem 0; padding:.65rem .75rem; border-radius:.5rem; background:#fffbeb; color:#92400e; font-size:.86rem; }
+.approval-actions { display:flex; flex-wrap:wrap; gap:.5rem; }
+.approval-actions button { min-width:8.5rem; }
+button:disabled { cursor:not-allowed; opacity:.55; }
+.status-pill.error { background:#fee2e2; color:#b91c1c; }
+.status-pill.done { background:#dcfce7; color:#15803d; }
+.status-pill.running { background:#dbeafe; color:#1d4ed8; }
+
+@media (min-width:768px) {
+  .workspace-tabs { grid-template-columns:repeat(4,minmax(0,1fr)); }
+  .workspace-main { grid-template-columns:minmax(0,1.2fr) minmax(0,.8fr); }
+  .workspace-metrics { grid-template-columns:repeat(4,minmax(0,1fr)); }
+  .approval-meta { flex-direction:row; align-items:baseline; justify-content:space-between; gap:1rem; }
+}
+
+@media (min-width:1024px) {
+  .agent-workspace,.approval-card { padding:1.2rem; }
+}

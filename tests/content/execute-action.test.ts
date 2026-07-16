@@ -32,6 +32,25 @@ describe("executeBrowserAction", () => {
     expect(clicked).toBe(true);
   });
 
+  it("resolves the decision ref from its snapshot after a newer observation snapshot", async () => {
+    let clicked = false;
+    document.body.innerHTML = `<div class="job-filter"><button id="first">第一批</button></div>`;
+    const { snapshotPage } = await import("../../src/agent/snapshot");
+    const first = snapshotPage();
+    const firstRef = first.elements.find(e => e.text === "第一批")!;
+    document.getElementById("first")!.addEventListener("click", () => { clicked = true; });
+
+    // 模拟控制页 GET_AGENT_CONTEXT 在 LLM 返回期间刷新页面观察快照。
+    document.body.insertAdjacentHTML("beforeend", `<div class="job-filter"><button id="second">第二批</button></div>`);
+    snapshotPage();
+
+    await executeBrowserAction(
+      { snapshotId: first.snapshotId, action: "click", ref: firstRef.id, reason: "", expected: "" },
+      { phase: "screen", greetMessage: "", forceGreetMessage: false }
+    );
+    expect(clicked).toBe(true);
+  });
+
   it("fill overwrites value with greetMessage when forceGreetMessage + chat region", async () => {
     // 注意：snapshotPage 的候选过滤要求 textOf(el).length > 0，空 textarea 会被排除，
     // 因此 fixture 给 textarea 一段初始文本，使其可被快照发现；不影响断言语义
@@ -59,5 +78,42 @@ describe("executeBrowserAction", () => {
     );
     expect(r.ok).toBe(false);
     expect(r.message).toMatch(/跨域/);
+  });
+
+  it("allows in-page greet control wrapped by an external-looking anchor", async () => {
+    let clicked = false;
+    document.body.innerHTML = `<div class="communicate"><a id="a" href="https://evil.com/"><button id="b">立即沟通</button></a></div>`;
+    document.getElementById("a")!.addEventListener("click", () => { clicked = true; });
+    const { snapshotPage } = await import("../../src/agent/snapshot");
+    const snap = snapshotPage();
+    const ref = snap.elements.find(e => e.text === "立即沟通")!;
+    const r = await executeBrowserAction(
+      { snapshotId: snap.snapshotId, action: "click", ref: ref.id, reason: "", expected: "" },
+      { phase: "greet", greetMessage: "", forceGreetMessage: false }
+    );
+    expect(r.ok).toBe(true);
+    expect(clicked).toBe(true);
+    expect(r.greetStatus).toBe("sent");
+  });
+
+  it("uses the visible button when the LLM ref points to a duplicate wrapper", async () => {
+    let clicked = false;
+    document.body.innerHTML = `
+      <div class="job-detail">
+        <span>立即沟通</span>
+        <button id="actual">立即沟通</button>
+      </div>`;
+    document.getElementById("actual")!.addEventListener("click", () => { clicked = true; });
+    const { snapshotPage } = await import("../../src/agent/snapshot");
+    const snap = snapshotPage();
+    const wrapperRef = snap.elements.find(e => e.text === "立即沟通" && e.role === "text");
+    expect(wrapperRef).toBeTruthy();
+    const r = await executeBrowserAction(
+      { snapshotId: snap.snapshotId, action: "click", ref: wrapperRef!.id, reason: "", expected: "" },
+      { phase: "greet", greetMessage: "", forceGreetMessage: false }
+    );
+    expect(r.ok).toBe(true);
+    expect(r.greetStatus).toBe("sent");
+    expect(clicked).toBe(true);
   });
 });

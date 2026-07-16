@@ -3,7 +3,7 @@
   "name": "BOSS 求职助手（Copilot）",
   "version": "0.3.0",
   "description": "可恢复地导入简历、分析求职意向并筛选匹配职位；高风险动作保留用户确认。",
-  "permissions": ["storage", "activeTab", "tabs", "sidePanel"],
+  "permissions": ["storage", "activeTab", "tabs", "scripting", "sidePanel"],
   "host_permissions": ["https://www.zhipin.com/*", "https://zhipin.com/*", "https://api.openai.com/*"],
   "optional_host_permissions": ["https://*/*", "http://*/*"],
   "background": {

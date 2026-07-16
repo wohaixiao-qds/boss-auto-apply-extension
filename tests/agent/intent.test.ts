@@ -45,4 +45,10 @@ describe("buildAgentIntent (profile removed)", () => {
     const i = buildAgentIntent(baseSettings(), emptyQuery);
     expect(i.defined).toBe(false);
   });
+
+  it("ignores the legacy minimum match score setting", () => {
+    const i = buildAgentIntent(baseSettings({ minMatchScore: "95", jobKeywords: "前端" }), emptyQuery);
+    expect(i.minMatchScore).toBe(0);
+    expect(i.summary).not.toContain("最低匹配");
+  });
 });

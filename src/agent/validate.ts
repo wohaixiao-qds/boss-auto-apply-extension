@@ -24,11 +24,15 @@ export function validateDecision(d: AgentDecision, ctx: ValidationContext): { ok
 
   if (ctx.phase === "screen") {
     if (refEl && (refEl.region === "chat" || /立即沟通|打招呼|沟通/.test(refEl.text))) return { ok: false, reason: "Phase A 不允许沟通操作" };
+    if (d.action === "rank_jobs" && ctx.ranked) return { ok: false, reason: "岗位已经完成排序，应进入打招呼审批" };
   }
   if (ctx.phase === "greet") {
     // P1-003：Phase B 只允许 click/fill/scroll/pause（pause 已早返回）；其余动作（含 collect_jobs/filter_jobs/rank_jobs/next_page/open_jobs/request_greet_approval）一律拒绝，保两阶段隔离。
     if (!["click", "fill", "scroll"].includes(d.action)) return { ok: false, reason: `Phase B 不允许动作：${d.action}` };
     if (refEl && refEl.region === "filter") return { ok: false, reason: "Phase B 不允许改筛选" };
+    if (d.action === "click" && refEl && !/立即沟通|打招呼|留在此页|继续沟通|关闭|发送|send|×/i.test(refEl.text)) {
+      return { ok: false, reason: "Phase B 只允许点击立即沟通或沟通结果控件，岗位切换由 Runtime 负责" };
+    }
     if (d.action === "fill" && refEl && refEl.region !== "chat") return { ok: false, reason: "Phase B fill 必须落在 chat 区" };
   }
   if (d.action === "request_greet_approval") {
@@ -56,7 +60,10 @@ export function validateSelectedUrls(urls: string[], rankedJobs: Job[], settings
   }
   for (const url of deduped) {
     let reason = "";
-    try { if (!/(^|\.)zhipin\.com$/i.test(new URL(url).hostname)) reason = "非 zhipin 域"; } catch { reason = "无效 URL"; }
+    try {
+      const parsed = new URL(url);
+      if (!/(^|\.)zhipin\.com$/i.test(parsed.hostname)) reason = "非 zhipin 域";
+    } catch { reason = "无效 URL"; }
     if (!reason && !ranked.has(url)) reason = "不在本次排序结果";
     if (!reason) {
       const job = rankedJobs.find(j => j.url === url);

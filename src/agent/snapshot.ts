@@ -1,4 +1,5 @@
 import type { BossQueryContext, PageSnapshot, SnapshotElement, SnapshotRegion } from "../types";
+import { parseBossJobsUrl } from "./boss-url";
 
 let snapshotSeq = 0;
 export function newSnapshotId(): string {
@@ -36,8 +37,17 @@ export function serializeSnapshotForLLM(snap: PageSnapshot): string {
 
 const SNAPSHOT_BUDGET = { search: 40, filter: 40, pager: 10, chat: 20, job: 30, other: 40 };
 
-const snapshotRefs = new Map<string, HTMLElement>();
-export function resetSnapshotRefs(): void { snapshotRefs.clear(); }
+// ref 必须绑定 snapshotId。控制页会定时读取页面上下文并生成观察快照，
+// 如果所有快照共用一个数字 ref 表，控制页的读取就会覆盖 LLM 正在使用的 ref。
+// 只保留最近若干批，避免旧 DOM 引用无限占用内存；动作执行使用 decision.snapshotId 精确取回。
+const snapshotRefsById = new Map<string, Map<string, HTMLElement>>();
+let activeSnapshotId = "";
+// 覆盖 LLM 30 秒请求超时 + 控制页约 1.5 秒一次的观察轮询。
+const MAX_SNAPSHOT_REF_BATCHES = 32;
+export function resetSnapshotRefs(): void {
+  snapshotRefsById.clear();
+  activeSnapshotId = "";
+}
 
 const isVisibleEl = (el: Element): boolean => {
   // 真实浏览器下，BOSS 常用 max-height:0/height:0 折叠下拉面板（而非 display:none），
@@ -57,6 +67,11 @@ function regionOf(el: HTMLElement): SnapshotRegion {
   const cls = norm(el.className);
   const text = norm(textOf(el));
   if (/search|搜索/.test(`${cls} ${text}`) && el.closest(".search-condition, .search-box, [class*='search']")) return "search";
+  // BOSS 列表页的右侧详情与筛选栏处于同一 SPA 页面，不能只按祖先 class 判断。
+  // 真实 DOM 中详情操作区是 .job-detail-*，沟通按钮是 .op-btn-chat/ka=cpc_job_list_chat_*；
+  // 这些语义信号优先于可能误包含 filter 关键词的外层容器。
+  if (el.matches(".op-btn-chat, [ka^='cpc_job_list_chat_']")
+    || el.closest(".job-detail-op, .job-detail-header, .job-detail-box, .job-detail-container, [class*='job-detail']")) return "job";
   if (el.closest(".search-condition, .job-filter, .filter-condition, [class*='filter']")) return "filter";
   if (/pager|next|下一页/.test(`${cls} ${text}`) || el.closest(".pager, [class*='pager'], [class*='next']")) return "pager";
   // chat：排除 not-chat-router 这类含 "chat" 子串但语义为"非聊天路由"的顶部容器，避免导航被误判 chat。
@@ -68,7 +83,7 @@ function regionOf(el: HTMLElement): SnapshotRegion {
 
 function roleOf(el: HTMLElement): SnapshotElement["role"] {
   const tag = el.tagName;
-  if (tag === "INPUT" || tag === "TEXTAREA") return "input";
+  if (tag === "INPUT" || tag === "TEXTAREA" || el.getAttribute("contenteditable") === "true") return "input";
   if (tag === "SELECT") return "select";
   if (tag === "A") return "link";
   if (tag === "OPTION") return "option";
@@ -104,33 +119,39 @@ function pageKind(): PageSnapshot["kind"] {
 }
 
 function deriveCurrentQuery(elements: SnapshotElement[]): BossQueryContext {
-  const q: BossQueryContext = { keyword: "", location: [], salary: [], jobTypes: [], workModes: [], experience: [], education: [], industries: [], companySizes: [], source: "unknown" };
+  const fromUrl = parseBossJobsUrl(location.href);
+  const q: BossQueryContext = { ...fromUrl, location: [...fromUrl.location], salary: [...fromUrl.salary], jobTypes: [...fromUrl.jobTypes], workModes: [...fromUrl.workModes], experience: [...fromUrl.experience], education: [...fromUrl.education], industries: [...fromUrl.industries], companySizes: [...fromUrl.companySizes] };
   const search = document.querySelector<HTMLInputElement>("input[type='search'], input.search-input, [class*='search'] input");
-  q.keyword = search?.value.trim() || "";
+  q.keyword = search?.value.trim() || fromUrl.keyword;
   for (const e of elements) {
     if (e.region !== "filter" || !e.text) continue;
     const dim = classifyChip(e.text);
     if (dim && e.current && Array.isArray(q[dim])) (q[dim] as string[]).push(e.current);
+  }
+  for (const key of ["location", "salary", "jobTypes", "workModes", "experience", "education", "industries", "companySizes"] as const) {
+    q[key] = [...new Set(q[key])];
   }
   q.source = q.keyword || Object.values(q).some(v => Array.isArray(v) && v.length) ? "search" : "recommend";
   return q;
 }
 
 export function snapshotPage(): PageSnapshot {
-  resetSnapshotRefs();
+  const snapshotId = newSnapshotId();
+  const snapshotRefs = new Map<string, HTMLElement>();
   const roots = ".search-condition, .job-filter, .filter-condition, .search-box, [class*='filter'], .job-box, .job-list-container, [class*='job-list'], [class*='chat']:not([class*='not-chat']), .pager, [class*='pager']";
   // 收集所有匹配的根节点（querySelector 只返回首个，会漏掉与 .job-list 同级的但落在后面的 .pager）。
   const scopes = Array.from(document.querySelectorAll<HTMLElement>(roots));
-  const scopeEls = scopes.length ? scopes : [document.body];
-  const candidate = "a, button, [role='button'], [role='option'], [role='menuitem'], [role='tab'], input, textarea, select, li, span, div";
+  // BOSS 页面 class 经常变化：保留专用区域，同时始终扫描 body，避免筛选已生效但快照没有任何 ref。
+  const scopeEls = scopes.length ? [...scopes, document.body] : [document.body];
+  const candidate = "a, button, [role='button'], [role='option'], [role='menuitem'], [role='tab'], input, textarea, select, [contenteditable='true'], li, span, div";
   const raw = scopeEls.flatMap(scope => [...scope.querySelectorAll<HTMLElement>(candidate)])
     .filter(isVisibleEl)
-    .filter(el => el.children.length === 0 || /INPUT|TEXTAREA|SELECT|BUTTON|A/.test(el.tagName) || el.getAttribute("role"))
+    .filter(el => el.children.length === 0 || /INPUT|TEXTAREA|SELECT|BUTTON|A/.test(el.tagName) || el.getAttribute("role") || el.getAttribute("contenteditable") === "true")
     .filter(el => {
       // input/textarea/select 即使文本为空也保留（空打招呼框、空搜索框需要被 LLM 选中 fill），
       // 它们以 placeholder/aria-label 作为可读名；其它元素仍要求非空且 <=40 字。
       const tag = el.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el.getAttribute("contenteditable") === "true") return true;
       const t = textOf(el);
       return t.length > 0 && t.length <= 40;
     });
@@ -156,15 +177,27 @@ export function snapshotPage(): PageSnapshot {
     const bucket = buckets[region];
     // P2-001：所有 region 都按各自预算截断（filter/pager/chat 不再无限保留，避免 payload 膨胀）。
     // filter/pager/chat 的预算已设得较宽松（见 SNAPSHOT_BUDGET），优先级靠排序前的强制保留保证。
-    if (bucket.length >= SNAPSHOT_BUDGET[region]) continue;
+    // BOSS 的右侧“立即沟通”可能被 regionOf 归入 job（它位于岗位详情容器内），
+    // 而左侧岗位卡片会先消耗完 job 预算。这个控件是打招呼阶段的唯一入口，
+    // 即使超出 job 预算也必须保留，否则 Runtime 的 DOM 校验通过后，下一轮快照
+    // 又会看不到按钮并反复重新选择同一个岗位。
+    const priorityGreetControl = /立即沟通|打招呼/.test(text);
+    if (bucket.length >= SNAPSHOT_BUDGET[region] && !priorityGreetControl) continue;
     const sid = String(id++);
     snapshotRefs.set(sid, el);
     bucket.push({ id: sid, role: roleOf(el), text: text.slice(0, 40), current: chipCurrent(el), checked: el.getAttribute("aria-selected") === "true" || el.getAttribute("aria-checked") === "true" || (el as HTMLInputElement).checked === true, hint, region });
   }
   const elements = [...buckets.filter, ...buckets.pager, ...buckets.chat, ...buckets.search, ...buckets.job, ...buckets.other];
   const currentQuery = deriveCurrentQuery(elements);
+  snapshotRefsById.set(snapshotId, snapshotRefs);
+  activeSnapshotId = snapshotId;
+  while (snapshotRefsById.size > MAX_SNAPSHOT_REF_BATCHES) {
+    const oldest = snapshotRefsById.keys().next().value;
+    if (typeof oldest !== "string") break;
+    snapshotRefsById.delete(oldest);
+  }
   return {
-    snapshotId: newSnapshotId(),
+    snapshotId,
     kind: pageKind(),
     url: location.href,
     path: location.pathname,
@@ -176,10 +209,12 @@ export function snapshotPage(): PageSnapshot {
 
 // id 体系容错：序列化给 LLM 看的是 [e0]，LLM 会回 ref="e0"；
 // 但 snapshotRefs 的 key 是纯数字 "0"。这里统一去掉前缀，两种写法都能命中。
-const refKey = (ref: string): string => ref.replace(/^e/i, "");
+const refKey = (ref: string): string => String(ref).trim().replace(/^e/i, "");
 
-export function resolveRef(ref: string): HTMLElement | null {
-  const el = snapshotRefs.get(refKey(ref));
+export function resolveRef(ref: string, snapshotId?: string): HTMLElement | null {
+  const refs = (snapshotId && snapshotRefsById.get(snapshotId))
+    || snapshotRefsById.get(activeSnapshotId);
+  const el = refs?.get(refKey(ref));
   if (!el || !document.contains(el)) return null;
   return el;
 }

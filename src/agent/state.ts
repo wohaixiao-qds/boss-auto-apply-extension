@@ -23,6 +23,7 @@ export function newAgentState(runId: string, sourceTabId: number | null, now: st
     visitedPageSignatures: [],
     currentGreetIndex: 0,
     currentGreetUrl: "",
+    greetListUrl: "",
     approvedForGreet: [],
     greeted: [],
     greetCap: 10,

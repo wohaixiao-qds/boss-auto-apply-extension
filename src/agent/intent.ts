@@ -2,20 +2,23 @@ import { mergeBossQueryWithUser } from "./query-plan";
 import type { AgentIntent, BossQueryContext, Settings } from "../types";
 
 const lines = (v: string): string[] => v.split(/\r?\n|[,，/|]/).map(s => s.trim()).filter(Boolean);
+const constraints = (v: string): string[] => lines(v).filter(value => value !== "不限");
 
 export function buildAgentIntent(settings: Settings, current: BossQueryContext): AgentIntent {
   const query = mergeBossQueryWithUser(current, settings);
   const userVals = [
-    settings.jobKeywords, settings.excludeCompanies, settings.targetLocations,
-    settings.targetSalary, settings.workMode, settings.jobTypes,
-    settings.workExperience, settings.education, settings.companyIndustries, settings.companySizes
-  ].some(v => lines(v || "").length > 0);
+    [settings.jobKeywords, settings.excludeCompanies],
+    [settings.targetLocations, settings.targetSalary, settings.workMode, settings.jobTypes,
+      settings.workExperience, settings.education, settings.companyIndustries, settings.companySizes]
+  ].some((group, index) => group.some(value => (index === 0 ? lines(value || "") : constraints(value || "")).length > 0));
   const pageVals = [
     current.keyword, ...current.location, ...current.salary, ...current.jobTypes,
     ...current.experience, ...current.education, ...current.industries, ...current.companySizes
   ].some(Boolean);
   const excludeCompanies = lines(settings.excludeCompanies);
-  const minMatchScore = Number.isFinite(Number(settings.minMatchScore)) ? Number(settings.minMatchScore) : 0;
+  // 匹配分只用于排序展示，不再作为岗位是否保留的筛选条件。
+  // 保留字段是为了兼容旧的存储数据和 AgentIntent 类型。
+  const minMatchScore = 0;
   const parts = [
     query.keyword && `职位：${query.keyword}`,
     query.location.length && `城市：${query.location.join("、")}`,
@@ -25,8 +28,7 @@ export function buildAgentIntent(settings: Settings, current: BossQueryContext):
     query.education.length && `学历：${query.education.join("、")}`,
     query.industries.length && `行业：${query.industries.join("、")}`,
     query.companySizes.length && `规模：${query.companySizes.join("、")}`,
-    excludeCompanies.length && `排除：${excludeCompanies.join("、")}`,
-    minMatchScore > 0 && `最低匹配：${minMatchScore}分`
+    excludeCompanies.length && `排除：${excludeCompanies.join("、")}`
   ].filter(Boolean) as string[];
   return {
     objective: "greet_matching",

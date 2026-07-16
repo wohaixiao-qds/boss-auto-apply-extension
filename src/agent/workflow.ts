@@ -36,6 +36,57 @@ function hashAction(d: AgentDecision): string {
   return `${d.action}|${d.ref ?? ""}|${d.value ?? ""}|${d.direction ?? ""}|${d.amount ?? ""}`;
 }
 
+function actionProgressSignature(state: AgentState, snapshot: PageSnapshot): string {
+  // 同一个页面快照和 ref 编号可能在不同岗位重复出现；岗位 URL/索引必须
+  // 纳入签名，否则跨岗位的正常点击会被误判为连续卡死。
+  return `${snapshot.summary}|phase=${state.phase}|greetIndex=${state.currentGreetIndex}|greetUrl=${state.currentGreetUrl}`;
+}
+
+function greetJobLabel(state: AgentState, url: string): string {
+  const job = state.lastRankedJobs.find(item => item.url === url);
+  // confirm:success 会先推进 currentGreetIndex 再写日志，不能用当前指针
+  // 计算已完成岗位的序号，否则第 N 个岗位会显示成 N+1/N。
+  const approvedIndex = state.approvedForGreet.indexOf(url);
+  const position = approvedIndex >= 0 ? approvedIndex + 1 : state.currentGreetIndex + 1;
+  return `${position}/${state.approvedForGreet.length} ${job?.company || "未知公司"} · ${job?.title || url}`;
+}
+
+const IMMEDIATE_GREET_TEXT = /立即沟通|打招呼/i;
+
+function jobIdFromUrl(url: string): string {
+  try {
+    const path = new URL(url).pathname.split("/").filter(Boolean).pop() || "";
+    return path.replace(/\.html$/i, "");
+  } catch {
+    return "";
+  }
+}
+
+function hasGreetedJob(state: AgentState, url: string): boolean {
+  const jobId = jobIdFromUrl(url);
+  return state.greeted.some(item => item === url || (jobId && jobIdFromUrl(item) === jobId));
+}
+
+function findImmediateGreetRef(
+  snapshot: PageSnapshot,
+  resolveRef: (ref: string, snapshotId?: string) => HTMLElement | null,
+  currentJobUrl: string
+): string | null {
+  const candidates = snapshot.elements
+    .filter(element => element.region !== "filter" && IMMEDIATE_GREET_TEXT.test(element.text))
+    .sort((a, b) => Number(b.role === "btn") - Number(a.role === "btn"));
+  const currentJobId = jobIdFromUrl(currentJobUrl);
+  if (currentJobId) {
+    const matched = candidates.find(candidate => {
+      const element = resolveRef(candidate.id, snapshot.snapshotId);
+      const ka = element?.getAttribute("ka") || "";
+      return ka.endsWith(currentJobId);
+    });
+    if (matched) return matched.id;
+  }
+  return candidates[0]?.id || null;
+}
+
 export class AgentRunner {
   private state: AgentState;
   private running = false;
@@ -84,7 +135,8 @@ export class AgentRunner {
         phase: this.state.phase,
         approvedForGreet: this.state.approvedForGreet,
         greeted: this.state.greeted,
-        currentGreetIndex: this.state.currentGreetIndex
+        currentGreetIndex: this.state.currentGreetIndex,
+        greetListUrl: this.state.greetListUrl
       });
     } catch {
       // 恢复镜像写入失败不应阻断主流程。
@@ -122,6 +174,7 @@ export class AgentRunner {
       this.state = newAgentState(crypto.randomUUID(), this.sourceTabId, nowIso());
       this.candidates = [];
       this.persistCandidates();
+      await chrome.storage.local.remove("agentLog");
     }
     this.running = true;
     try {
@@ -143,12 +196,15 @@ export class AgentRunner {
 
   async resume(): Promise<void> {
     if (TERMINAL_STEPS.includes(this.state.step) || this.running) return;
-    // 从 chrome.storage.local 镜像合并恢复数据（审批通过后由 background 写入）。
-    await this.loadRecovery();
-    // Carry-forward（Task 7→8）：审批通过的列表到达后，先过 validateSelectedUrls 再进入打招呼循环。
-    await this.validateApprovedForGreet();
+    // 必须在第一次 await 之前占用运行锁。
+    // 否则页面导航、审批回调和 content 初始化可能同时调用 resume()，
+    // 两个 Agent loop 会并行操作同一个 BOSS 页面。
     this.running = true;
     try {
+      // 从 chrome.storage.local 镜像合并恢复数据（审批通过后由 background 写入）。
+      await this.loadRecovery();
+      // Carry-forward（Task 7→8）：审批通过的列表到达后，先过 validateSelectedUrls 再进入打招呼循环。
+      await this.validateApprovedForGreet();
       await this.run();
     } finally {
       this.running = false;
@@ -166,7 +222,7 @@ export class AgentRunner {
     if (this.state.greetStatus[url] !== "unknown") return;
     const status = verdict === "sent" ? "verified" : "failed";
     this.state.greetStatus = { ...this.state.greetStatus, [url]: status };
-    if (status === "verified" && !this.state.greeted.includes(url)) {
+    if (status === "verified" && !hasGreetedJob(this.state, url)) {
       this.state.greeted = [...this.state.greeted, url];
     }
     if (this.state.currentGreetUrl === url) this.state.currentGreetUrl = "";
@@ -197,6 +253,108 @@ export class AgentRunner {
     this.persist();
   }
 
+  private async openNextJobFromList(url: string): Promise<{ handled: boolean; pause: boolean }> {
+    const job = this.state.lastRankedJobs.find(item => item.url === url);
+    const listUrl = job?.listUrl || this.state.greetListUrl;
+    if (!listUrl) {
+      return await this.failCurrentJob(url, "找不到该岗位对应的 BOSS 列表页");
+    }
+
+    const current = this.tools.snapshot();
+    // BOSS 选择岗位后可能只更新右侧详情/URL 参数，snapshot 仍是 jobs；
+    // 只要当前仍是列表页，就留在原页面切换卡片，不要重新导航。
+    if (current.kind !== "jobs") {
+      this.state.currentGreetUrl = url;
+      // 仍保持 pending：回到列表页后还要真正点击岗位卡片，不能让下一轮 LLM 误以为已经进入详情页。
+      const targetUrl = listUrl.split("#")[0];
+      this.state = bumpState({ ...this.state, error: "", lastDecision: `return_to_job_list: ${targetUrl}` }, nowIso());
+      this.persist();
+      await this.persistRecovery();
+      if (!this.tools.navigateToUrl) {
+        return await this.failCurrentJob(url, "当前无法返回岗位列表页");
+      }
+      await this.tools.navigateToUrl(targetUrl);
+      await this.setStatus(true, "返回岗位列表，准备打开下一条岗位", "greeting");
+      return { handled: true, pause: true };
+    }
+
+    if (!this.tools.openJobFromList) {
+      return await this.failCurrentJob(url, "当前页面不支持从岗位列表打开岗位");
+    }
+    const targetJob = this.state.lastRankedJobs.find(item => item.url === url);
+    if (!targetJob) {
+      return await this.failCurrentJob(url, "批准岗位不在当前排序结果中");
+    }
+
+    this.state.currentGreetUrl = url;
+    await logDecision(`GREET ${greetJobLabel(this.state, url)} | select_card:start | 等待列表卡片与右侧详情对应`);
+    // 选择卡片和确认右侧详情期间仍保持 pending；只有确认出现“立即沟通”后才进入 opening。
+    this.state.greetStatus = { ...this.state.greetStatus, [url]: "pending" };
+    this.state = bumpState({ ...this.state, error: "", lastDecision: `select_job_card: ${url}` }, nowIso());
+    this.persist();
+    await this.persistRecovery();
+    const opened = await this.tools.openJobFromList(targetJob);
+    if (!opened.ok) {
+      // 保留 pending，允许用户确认列表已加载后继续，不跳过批准岗位。
+      this.state.greetStatus = { ...this.state.greetStatus, [url]: "pending" };
+      this.state = bumpState({ ...this.state, step: "awaiting_input", error: opened.message, lastDecision: `click_job_from_list 失败：${opened.message}` }, nowIso());
+      this.persist();
+      await this.persistRecovery();
+      await this.setStatus(true, `${opened.message}；请确认当前列表页包含该岗位后继续`, "awaiting_input");
+      await logDecision(`GREET ${greetJobLabel(this.state, url)} | select_card:failed | ${opened.message}`);
+      return { handled: true, pause: true };
+    }
+    this.state.greetStatus = { ...this.state.greetStatus, [url]: "opening" };
+    this.state = bumpState({ ...this.state, error: "", lastDecision: `job_card_selected: ${url}` }, nowIso());
+    this.persist();
+    await this.persistRecovery();
+    await this.setStatus(true, "已从岗位列表打开目标岗位，进入沟通", "greeting");
+    await logDecision(`GREET ${greetJobLabel(this.state, url)} | select_card:verified | 右侧已出现立即沟通`);
+    // 普通链接点击会销毁当前 content 上下文；若 BOSS 使用 SPA 路由，定时恢复也能继续流程。
+    setTimeout(() => void this.resume(), 1200);
+    return { handled: true, pause: true };
+  }
+
+  private async resolveSentGreet(url: string): Promise<{ handled: boolean; pause: boolean }> {
+    if (this.state.greetStatus[url] !== "sent") return { handled: true, pause: false };
+    await logDecision(`GREET ${greetJobLabel(this.state, url)} | confirm:start | 等待 BOSS 发送成功弹窗`);
+    const confirmation = this.tools.confirmAndDismissGreet
+      ? await this.tools.confirmAndDismissGreet()
+      : { ok: false, message: "当前页面不支持确认 BOSS 发送结果" };
+
+    // 另一个恢复循环可能已经完成了同一岗位；不要用较晚的失败结果覆盖 verified。
+    if (this.state.greetStatus[url] !== "sent") return { handled: true, pause: false };
+    if (!confirmation.ok) {
+      const message = `${confirmation.message}，未确认打招呼成功，暂停当前岗位`;
+      this.state.greetStatus = { ...this.state.greetStatus, [url]: "unknown" };
+      this.state = bumpState({ ...this.state, step: "awaiting_input", error: message, lastDecision: "greet_confirmation_missing" }, nowIso());
+      this.persist();
+      await this.persistRecovery();
+      await this.setStatus(true, message, "awaiting_input");
+      await logDecision(`GREET ${greetJobLabel(this.state, url)} | confirm:failed | ${confirmation.message}`);
+      return { handled: true, pause: true };
+    }
+
+    this.state.greetStatus = { ...this.state.greetStatus, [url]: "verified" };
+    if (!hasGreetedJob(this.state, url)) this.state.greeted = [...this.state.greeted, url];
+    this.state.currentGreetIndex += 1;
+    this.state.currentGreetUrl = "";
+    this.state = bumpState({
+      ...this.state,
+      error: "",
+      lastDecision: `greet confirmation: ${url}；已确认发送`,
+      lastActionHash: "",
+      sameActionCount: 0,
+      lastProgressSignature: ""
+    }, nowIso());
+    this.persist();
+    await this.persistRecovery();
+    await this.setStatus(true, "已确认 BOSS 发送招呼成功，返回列表继续下一岗位", "greeting");
+    await logDecision(`GREET ${greetJobLabel(this.state, url)} | confirm:success | 已关闭成功弹窗，推进下一岗位`);
+    await sleep(300);
+    return { handled: true, pause: false };
+  }
+
   /**
    * Phase B Runtime 编排：终态判定、岗位指针推进、自动打开下一岗位。
    * 返回 handled=true 表示本轮由 Runtime 处理（调用方应直接返回 pause）；handled=false 表示交给 LLM 单步。
@@ -219,7 +377,7 @@ export class AgentRunner {
 
     // 双重判重防护：当前 url 已是终态（verified/failed）或已记入 greeted[]，
     // 直接推进指针，不落入 LLM 单步（避免对已打招呼的 URL 二次打招呼）。
-    if (status === "verified" || status === "failed" || this.state.greeted.includes(url)) {
+    if (status === "verified" || status === "failed" || hasGreetedJob(this.state, url)) {
       this.state.currentGreetIndex += 1;
       this.state.currentGreetUrl = "";
       this.state = bumpState({ ...this.state, lastDecision: `skip already-greeted: ${url}（${status}）` }, nowIso());
@@ -228,12 +386,12 @@ export class AgentRunner {
       return { handled: true, pause: false };
     }
 
-    // 当前岗位尚未打开 → Runtime 自动导航打开。
+    // 当前岗位尚未打开 → 先回到该岗位所在列表页，再点击岗位卡片。
     if (status === "pending") {
-      return await this.openApprovedJob(url);
+      return await this.openNextJobFromList(url);
     }
 
-    // opening/message_filled → 交给 LLM 单步（fall through）。
+    // opening（已确认“立即沟通”）/message_filled → 交给 LLM 单步（fall through）。
     // verified/unknown/failed 为终态：verified/failed 应已在产生时推进 index；unknown 暂停等待人工。
     if (status === "unknown") {
       const message = `岗位 ${url} 打招呼结果不明确，等待人工裁决`;
@@ -246,40 +404,24 @@ export class AgentRunner {
       return { handled: true, pause: true };
     }
 
-    return { handled: false, pause: false };
-  }
+    // sent 表示已经点击过“立即沟通”，只等待成功弹窗确认，禁止再次点击。
+    if (status === "sent") return await this.resolveSentGreet(url);
 
-  /** Runtime 打开已批准岗位：域名校验 → 导航 → 置 opening → 交 LLM。 */
-  private async openApprovedJob(url: string): Promise<{ handled: boolean; pause: boolean }> {
-    let parsed: URL;
-    try { parsed = new URL(url); } catch {
-      return await this.failCurrentJob(url, "无效的岗位 URL");
-    }
-    if (!/(^|\.)zhipin\.com$/i.test(parsed.hostname)) {
-      return await this.failCurrentJob(url, "非 zhipin 域");
-    }
-    // P1-009：导航（tabs.update）会硬跳转并销毁当前 content script，
-    // 必须先把 currentGreetUrl / greetStatus=opening / index 持久化，再执行导航；
-    // 否则页面可能在状态落盘前刷新，导致 currentGreetUrl 丢失、状态仍 pending、同一岗位被重开。
-    this.state.currentGreetUrl = url;
-    this.state.greetStatus = { ...this.state.greetStatus, [url]: nextGreetStatus("pending", "opened") };
-    this.state = bumpState({ ...this.state, error: "", lastDecision: `open_approved_job: ${url}` }, nowIso());
-    this.persist();
-    await this.persistRecovery();
-    try {
-      if (this.tools.navigateToUrl) {
-        await this.tools.navigateToUrl(url);
-      } else {
-        // 兜底：同源直接跳转（zhipin 内）。
-        location.href = url;
+    // opening 只允许在右侧“立即沟通”仍可见时交给 LLM。
+    // 页面刷新、SPA 状态回退或旧版本状态恢复时，如果按钮不存在，重新走列表卡片选择。
+    if (status === "opening") {
+      const current = this.tools.snapshot();
+      const greetReady = current.elements.some(element => /立即沟通/.test(element.text));
+      if (!greetReady) {
+        this.state.greetStatus = { ...this.state.greetStatus, [url]: "pending" };
+        this.state = bumpState({ ...this.state, error: "", lastDecision: `opening_not_ready: ${url}；快照未发现立即沟通` }, nowIso());
+        this.persist();
+        await this.persistRecovery();
+        return await this.openNextJobFromList(url);
       }
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      return await this.failCurrentJob(url, `导航失败：${reason}`);
     }
-    await this.setStatus(true, `已打开岗位 ${url}，进入沟通`, "greeting");
-    // 导航会销毁当前 content 上下文；交由新页面 resume，这里暂停。
-    return { handled: true, pause: true };
+
+    return { handled: false, pause: false };
   }
 
   /** 当前岗位标记失败、推进指针、自动进入下一岗（下一轮 Runtime 处理）。 */
@@ -314,6 +456,47 @@ export class AgentRunner {
     this.persist();
     await this.persistRecovery();
     await this.setStatus(true, message, "done");
+  }
+
+  private async requestApprovalWhenScreenReady(settings: Settings): Promise<boolean> {
+    if (this.state.phase !== "screen"
+      || !this.state.jobsCollected
+      || !this.state.filterCompleted
+      || !this.state.ranked
+      || !this.candidates.length) return false;
+
+    const snapshot = this.tools.snapshot();
+    const intent = buildAgentIntent(settings, snapshot.currentQuery);
+    const { satisfied, missing } = effectiveQuerySatisfied(intent.query, snapshot.currentQuery, snapshot);
+    if (!satisfied) {
+      this.state = bumpState({
+        ...this.state,
+        error: `筛选未完成：${missing.join("、")}`,
+        lastDecision: "等待补齐 BOSS 查询条件后再申请打招呼审批"
+      }, nowIso());
+      this.persist();
+      return false;
+    }
+
+    const listUrl = snapshot.kind === "jobs" ? snapshot.url.split("#")[0] : this.state.greetListUrl;
+    const approval = await this.tools.requestApproval({
+      action: "greet",
+      title: "打招呼审批",
+      description: `已排序 ${this.state.lastRankedJobs.length} 个岗位，是否开始打招呼？`,
+      jobs: this.state.lastRankedJobs
+    });
+    void approval;
+    this.state = bumpState({
+      ...this.state,
+      greetListUrl: listUrl,
+      step: "awaiting_approval",
+      error: "",
+      lastDecision: "runtime: 岗位已收集、过滤和排序完成，申请打招呼审批"
+    }, nowIso());
+    this.persist();
+    await this.persistRecovery();
+    await this.setStatus(true, "已请求打招呼审批，等待人工确认", "awaiting_approval");
+    return true;
   }
 
   /**
@@ -351,7 +534,7 @@ export class AgentRunner {
     }
 
     if (next === "verified") {
-      if (!this.state.greeted.includes(url)) this.state.greeted = [...this.state.greeted, url];
+      if (!hasGreetedJob(this.state, url)) this.state.greeted = [...this.state.greeted, url];
       this.state.currentGreetIndex += 1;
       this.state.currentGreetUrl = "";
       this.state = bumpState({ ...this.state, error: "", lastDecision: `greet verified: ${url}；自动进入下一岗` }, nowIso());
@@ -394,7 +577,14 @@ export class AgentRunner {
       if (phaseB.handled) return { pause: phaseB.pause };
     }
 
-    const snapshot = snapshotPage();
+    let snapshot = snapshotPage();
+    // URL 跳转后 BOSS 需要异步 hydrate 筛选栏和岗位列表；首个快照为空时短暂重试，避免误判为“没有可操作元素”。
+      if (this.state.phase === "screen" && this.state.appliedFilters.includes("url_filters_applied") && snapshot.elements.length === 0) {
+      for (let attempt = 0; attempt < 6 && snapshot.elements.length === 0; attempt += 1) {
+        await sleep(500);
+        snapshot = snapshotPage();
+      }
+    }
     this.currentSnapshot = snapshot;
     const intent = buildAgentIntent(settings, snapshot.currentQuery);
     const payload = buildLlmPayload({
@@ -404,8 +594,9 @@ export class AgentRunner {
     });
 
     const planned = await this.tools.planAction(payload);
-    const decision = planned.decision;
-    void logDecision(`T${this.state.phaseTurns} ${decision.action} ${decision.ref ?? ""}${decision.value ? `="${decision.value.slice(0, 15)}"` : ""} | ${decision.reason.slice(0, 50)} | 页面cur: ${describeQuery(snapshot.currentQuery)}`);
+    let decision = planned.decision;
+    const pageContext = snapshot.kind === "job_detail" ? "当前岗位详情页" : `页面cur: ${describeQuery(snapshot.currentQuery)}`;
+    void logDecision(`T${this.state.phaseTurns} ${decision.action} ${decision.ref ?? ""}${decision.value ? `="${decision.value.slice(0, 15)}"` : ""} | ${decision.reason.slice(0, 50)} | ${pageContext}`);
     const ctx = {
       snapshot,
       phase: this.state.phase,
@@ -414,17 +605,53 @@ export class AgentRunner {
       filterCompleted: this.state.filterCompleted,
       ranked: this.state.ranked
     };
-    const validation = this.tools.validateDecision(decision, ctx);
+    let validation = this.tools.validateDecision(decision, ctx);
+
+    // Phase B 已由 Runtime 确认右侧存在“立即沟通”时，LLM 偶尔会返回一个
+    // 旧/错误的筛选 ref。这里不执行该危险 ref，而是把意图收敛到当前快照
+    // 中唯一合法的立即沟通控件；这是安全修正，不是放宽 Phase B 校验。
+    if (!validation.ok
+      && this.state.phase === "greet"
+      && decision.action === "click"
+      && decision.snapshotId === snapshot.snapshotId
+      && this.state.currentGreetUrl
+      && ["opening", "message_filled"].includes(this.state.greetStatus[this.state.currentGreetUrl] || "")) {
+      const greetRef = findImmediateGreetRef(snapshot, this.tools.resolveRef, this.state.currentGreetUrl);
+      if (greetRef && greetRef !== decision.ref) {
+        const repaired = {
+          ...decision,
+          ref: greetRef,
+          reason: `Runtime 将错误 ref ${decision.ref || "（空）"} 修正为当前岗位的立即沟通控件`
+        };
+        const repairedValidation = this.tools.validateDecision(repaired, ctx);
+        if (repairedValidation.ok) {
+          decision = repaired;
+          validation = repairedValidation;
+          await logDecision(`GREET ${greetJobLabel(this.state, this.state.currentGreetUrl)} | decision:repair | ${decision.ref} | 原 ref ${planned.decision.ref || "（空）"} 不属于沟通控件`);
+        }
+      }
+    }
+
     if (!validation.ok) {
-      const message = `决策校验失败：${validation.reason}`;
-      this.state = bumpState({ ...this.state, error: message, lastDecision: `${decision.action}: ${decision.reason}` }, nowIso());
+      // 校验失败也必须进入卡死检测；此前该分支直接 return，导致 LLM 可以
+      // 无限返回同一个非法 ref，sameActionCount 永远不会达到阈值。
+      const invalidHash = hashAction(decision);
+      this.state = recordAction(this.state, invalidHash, actionProgressSignature(this.state, snapshot));
+      const repeatedInvalid = this.state.sameActionCount >= 2;
+      const message = repeatedInvalid
+        ? `连续重复非法决策 ${this.state.sameActionCount + 1} 次，已暂停：${validation.reason}`
+        : `决策校验失败：${validation.reason}`;
+      this.state = bumpState({ ...this.state, step: repeatedInvalid ? "awaiting_input" : this.state.step, error: message, lastDecision: `${decision.action}: ${decision.reason}` }, nowIso());
       this.persist();
-      await this.setStatus(false, message);
-      return { pause: false };
+      if (this.state.phase === "greet" && this.state.currentGreetUrl) {
+        await logDecision(`GREET ${greetJobLabel(this.state, this.state.currentGreetUrl)} | decision:rejected | ${message}`);
+      }
+      await this.setStatus(false, message, repeatedInvalid ? "awaiting_input" : undefined);
+      return { pause: repeatedInvalid };
     }
 
     // 卡死检测：统一由 guardrails.recordAction 记录；命中阈值后在下一轮 run() 开头由 shouldBreak 判定。
-    const sig = snapshot.summary;
+    const sig = actionProgressSignature(this.state, snapshot);
     const h = hashAction(decision);
     this.state = recordAction(this.state, h, sig);
 
@@ -451,6 +678,14 @@ export class AgentRunner {
         await sleep(400);
         return { pause: false };
       }
+      const listUrl = snapshot.kind === "jobs" ? snapshot.url.split("#")[0] : this.state.greetListUrl;
+      this.state = bumpState({
+        ...this.state,
+        greetListUrl: listUrl,
+        error: "",
+        lastDecision: `request_greet_approval: ${decision.reason}`
+      }, nowIso());
+      this.persist();
       // 满足 → 请求人工审批打招呼，进入等待。
       const approval = await this.tools.requestApproval({
         action: "greet",
@@ -526,13 +761,16 @@ export class AgentRunner {
       }
       case "rank_jobs": {
         if (!this.candidates.length) {
-          result = { ok: false, message: "没有岗位可供排序" };
+          result = { ok: false, message: "当前 BOSS 查询条件下没有可供排序的岗位，请调整 BOSS 查询条件后重试" };
         } else {
           this.candidates = await this.tools.rankJobs(this.candidates);
           this.state.ranked = true;
           this.state.lastRankedJobs = this.candidates;
           this.persistCandidates();
+          this.persist();
           await this.tools.saveJobs(this.candidates);
+          // 排序成功后立即进入审批，避免下一轮 LLM 再次选择 rank_jobs。
+          if (await this.requestApprovalWhenScreenReady(settings)) return { pause: true };
           result = { ok: true, message: `已完成 ${this.candidates.length} 个岗位的匹配排序` };
         }
         break;
@@ -545,11 +783,35 @@ export class AgentRunner {
 
     if (!result.ok) {
       const message = result.message;
+      if (this.state.phase === "greet" && this.state.currentGreetUrl) {
+        await logDecision(`GREET ${greetJobLabel(this.state, this.state.currentGreetUrl)} | click:failed | ${message}`);
+      }
       this.state = bumpState({ ...this.state, error: message, lastDecision: `${decision.action}: ${decision.reason}` }, nowIso());
       this.persist();
       await this.setStatus(false, `${message}；Agent 将重新观察并调整动作`);
       await sleep(800);
       return { pause: false };
+    }
+
+    // BOSS 的“立即沟通”是当前岗位的发送动作，但最终状态仍以成功弹窗为准。
+    // 执行层返回 greetStatus=sent，避免依赖可能已经变化的旧快照 ref 文本。
+    const clickedOpenChat = this.state.phase === "greet"
+      && decision.action === "click"
+      && result.greetStatus === "sent";
+    if (clickedOpenChat) {
+      await sleep(350);
+      const afterClick = snapshotPage();
+      this.currentSnapshot = afterClick;
+      const url = this.state.currentGreetUrl;
+      if (url) {
+        // 先落盘 sent，再等待弹窗确认，防止并发恢复或下一轮再次点击同一个按钮。
+        this.state.greetStatus = { ...this.state.greetStatus, [url]: "sent" };
+        this.state = bumpState({ ...this.state, error: "", lastDecision: `greet click: ${url}；等待发送确认` }, nowIso());
+        this.persist();
+        await this.persistRecovery();
+        await logDecision(`GREET ${greetJobLabel(this.state, url)} | click:sent | 已点击立即沟通，禁止重复点击，等待弹窗确认`);
+        return await this.resolveSentGreet(url);
+      }
     }
 
     // Phase B FSM：根据刚执行的动作 + 快照推 event，推进 greetStatus。
@@ -599,6 +861,29 @@ export class AgentRunner {
           await this.setStatus(true, brk.reason, "awaiting_input");
           return;
         }
+
+        // URL 优先应用岗位筛选条件：BOSS 下拉依赖真实 hover，DOM click 不可靠时由 URL 直接进入筛选结果。
+        // 只在本轮筛选阶段执行一次；跳转后的新 content script 会从 sessionStorage 恢复并继续采集岗位。
+        if (this.state.phase === "screen" && !this.state.appliedFilters.includes("url_filters_applied") && this.tools.applyUrlFilters) {
+          const urlResult = await this.tools.applyUrlFilters();
+          if (!urlResult.ok) {
+            this.state = bumpState({ ...this.state, error: urlResult.message, lastDecision: `url_filters failed: ${urlResult.message}` }, nowIso());
+            this.persist();
+            await this.setStatus(false, urlResult.message, "failed");
+            return;
+          }
+          this.state.appliedFilters = [...this.state.appliedFilters, "url_filters_applied"];
+          this.state = bumpState({ ...this.state, step: "apply_filters", error: "", lastDecision: `url_filters: ${urlResult.message}` }, nowIso());
+          this.persist();
+          await this.setStatus(true, urlResult.message, "apply_filters");
+          if (urlResult.pageMayChange) {
+            setTimeout(() => void this.resume(), 1200);
+            return;
+          }
+        }
+
+        // 排序完成后由 Runtime 直接进入审批，避免 LLM 在 ranked=true 时反复选择 rank_jobs。
+        if (await this.requestApprovalWhenScreenReady(settings)) return;
 
         const { pause } = await this.executeTurn(settings);
         if (pause) return;

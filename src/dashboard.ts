@@ -3,7 +3,15 @@ import type { AgentIntent, ApprovalRequest, BootstrapStatus, BossQueryContext, J
 if (new URLSearchParams(location.search).has("embedded")) document.body.classList.add("embedded");
 let sourceTabId = Number(new URLSearchParams(location.search).get("tabId")) || null;
 let dead = false;
-let collectListening = false;
+let refreshInFlight: Promise<void> | null = null;
+let renderedApprovalKey = "";
+let hasAgentContext = false;
+type DashboardTab = "overview" | "approval" | "jobs" | "observe";
+const validTabs: DashboardTab[] = ["overview", "approval", "jobs", "observe"];
+let activeTab: DashboardTab = validTabs.includes(new URLSearchParams(location.search).get("tab") as DashboardTab)
+  ? new URLSearchParams(location.search).get("tab") as DashboardTab
+  : "overview";
+let autoFocusedApprovalId = "";
 
 interface AgentContextSnapshot {
   snapshot: PageSnapshot;
@@ -39,9 +47,53 @@ async function waitForContentScript(tabId: number): Promise<boolean> {
   return false;
 }
 
+async function ensureContentScript(tabId: number): Promise<boolean> {
+  if (await waitForContentScript(tabId)) return true;
+  setNotice("BOSS 页面脚本未响应，正在自动恢复…");
+  try {
+    // 扩展重载后，已打开的 BOSS 标签页不会自动重新执行 content_scripts。
+    // 这里直接补注入，避免把刷新页面作为唯一恢复手段。
+    await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    setNotice(`无法自动连接 BOSS 页面脚本：${reason}`, true);
+    return false;
+  }
+  if (await waitForContentScript(tabId)) return true;
+  setNotice("BOSS 页面脚本恢复失败，请刷新当前 BOSS 页面后重试", true);
+  return false;
+}
+
 function setNotice(message: string, error = false): void {
   $("notice").textContent = message;
   $("notice").className = `notice${error ? " error" : ""}`;
+}
+
+function activateTab(tab: DashboardTab, persist = true): void {
+  activeTab = tab;
+  document.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach(button => {
+    const selected = button.dataset.tab === tab;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-selected", String(selected));
+  });
+  document.querySelectorAll<HTMLElement>("[data-panel]").forEach(panel => {
+    const selected = panel.dataset.panel === tab;
+    panel.hidden = !selected;
+    panel.classList.toggle("active", selected);
+  });
+  if (persist) {
+    const url = new URL(location.href);
+    url.searchParams.set("tab", tab);
+    history.replaceState(null, "", url);
+  }
+}
+
+function updateTabBadge(id: string, count: number, attention = false): void {
+  const badge = $(id);
+  badge.textContent = String(count);
+  badge.hidden = count <= 0;
+  const tab = badge.closest<HTMLButtonElement>("[data-tab]");
+  tab?.classList.toggle("needs-attention", attention);
 }
 
 async function sourceTab(): Promise<chrome.tabs.Tab | null> {
@@ -101,10 +153,9 @@ function renderSettings(settings: Settings): void {
     ["学历", settings.education],
     ["行业", settings.companyIndustries],
     ["规模", settings.companySizes],
-    ["工作方式", settings.workMode],
-    ["最低分", settings.minMatchScore]
+    ["工作方式", settings.workMode]
   ].filter(([, value]) => Boolean(value));
-  $("filterSummary").innerHTML = filters.length ? filters.map(([label, value]) => `<span>${esc(label)}：${esc(value)}</span>`).join("") : "<span>尚未设置，点击“岗位筛选设置”</span>";
+  if (!hasAgentContext) $("filterSummary").innerHTML = filters.length ? filters.map(([label, value]) => `<span>${esc(label)}：${esc(value)}</span>`).join("") : "<span>尚未设置，点击“岗位筛选设置”</span>";
   const aiReady = Boolean(settings.aiEnabled && settings.aiApiKey);
   // P2-004：当前没有本地 Planner 兜底——无 LLM 时 planAgentAction 直接失败，UI 必须如实说明，不能说“使用本地规则”。
   $("aiStatus").textContent = aiReady ? `已连接 · ${settings.aiModel || "gpt-4o-mini"}` : "未配置 LLM，无法启动";
@@ -130,10 +181,12 @@ function queryValues(query: BossQueryContext): string[] {
 
 function renderAgentContext(context: AgentContextSnapshot | null, status: BootstrapStatus | null): void {
   if (!context) {
+    hasAgentContext = false;
     $("currentPage").textContent = "等待连接 BOSS 页面";
     $("currentQuerySummary").innerHTML = "<span>打开 BOSS 页面后自动读取</span>";
     return;
   }
+  hasAgentContext = true;
   const sourceLabels: Record<AgentIntent["source"], string> = {
     user: "来自用户设置",
     page: "来自 BOSS 当前条件"
@@ -147,8 +200,7 @@ function renderAgentContext(context: AgentContextSnapshot | null, status: Bootst
   const currentValues = queryValues(context.currentQuery);
   const targetValues = [
     ...queryValues(context.intent.query),
-    ...context.intent.excludeCompanies.map(company => `排除：${company}`),
-    context.intent.minMatchScore > 0 ? `最低匹配：${context.intent.minMatchScore}分` : ""
+    ...context.intent.excludeCompanies.map(company => `排除：${company}`)
   ].filter(Boolean);
   $("intentSource").textContent = sourceLabels[context.intent.source];
   $("intentSummary").textContent = context.intent.summary;
@@ -174,22 +226,89 @@ function renderAgentContext(context: AgentContextSnapshot | null, status: Bootst
 }
 
 function renderJobs(jobs: Job[]): void {
+  updateTabBadge("jobsTabBadge", jobs.length);
   $("jobCount").textContent = `${jobs.length} 个匹配岗位`;
   $("jobsBody").innerHTML = jobs.length
     ? jobs.map(job => `<tr><td><span class="score">${esc(job.score)} 分</span></td><td>${esc(job.company)}</td><td>${esc(job.title)}</td><td>${esc(job.location)}</td><td>${esc(job.salary)}</td><td>${esc(job.reason || job.matchedKeywords.join("、") || "规则匹配")}</td></tr>`).join("")
     : `<tr><td colspan="6" class="empty-cell">没有达到筛选条件的岗位</td></tr>`;
 }
 
-function renderAgentStatus(status: BootstrapStatus | null): void {
+function renderAgentStatus(status: BootstrapStatus | null, approval: ApprovalRequest | null = null): void {
   const element = $("status");
-  const step = status?.step || "idle";
+  const step = approval?.status === "pending" ? "awaiting_approval" : status?.step || "idle";
   element.textContent = status?.ok === false ? "执行失败" : step === "done" ? "已完成" : step === "awaiting_input" ? "等待补充" : step === "idle" ? "待启动" : "执行中";
   element.className = `status-pill ${status?.ok === false ? "error" : step === "done" ? "done" : step === "idle" ? "idle" : "running"}`;
 }
 
-function renderProgress(status: BootstrapStatus | null): void {
+function renderAgentWorkspace(status: BootstrapStatus | null, context: AgentContextSnapshot | null, approval: ApprovalRequest | null): void {
+  const step = status?.step || "idle";
+  const state = status?.state;
+  const phaseLabels: Record<string, string> = {
+    idle: "待启动",
+    find_jobs: "查找岗位",
+    apply_filters: "应用筛选",
+    extract_jobs: "采集岗位",
+    filter_jobs: "筛选岗位",
+    rank_jobs: "匹配岗位",
+    awaiting_approval: "需要审批",
+    greeting: "打招呼中",
+    awaiting_input: "等待补充",
+    done: "已完成",
+    failed: "执行失败"
+  };
+  const headlineLabels: Record<string, string> = {
+    idle: "等待 Agent 启动",
+    find_jobs: "正在定位 BOSS 职位列表",
+    apply_filters: "正在把目标条件应用到 BOSS",
+    extract_jobs: "正在读取岗位并准备翻页",
+    filter_jobs: "正在按岗位条件筛选",
+    rank_jobs: "正在判断岗位是否值得沟通",
+    awaiting_approval: "岗位已筛选，等待你的确认",
+    greeting: "正在按列表逐个打招呼",
+    awaiting_input: "需要补充岗位目标",
+    done: "本轮任务已完成",
+    failed: "Agent 暂停，需要处理异常"
+  };
+  const defaultMessages: Record<string, string> = {
+    idle: "打开 BOSS 页面后，Agent 会根据你的岗位筛选条件观察并执行下一步。",
+    awaiting_approval: "岗位已经整理完成。请在下方选择要打招呼的岗位，批准后 Agent 会留在列表页逐个处理。",
+    greeting: "Agent 会先确认列表卡片和右侧详情对应，再点击“立即沟通”，等待发送成功后进入下一个岗位。",
+    done: "本轮没有待执行动作，可以查看下方的岗位结果和决策日志。",
+    awaiting_input: "请补充岗位关键词或筛选条件，Agent 才能继续规划。",
+    failed: "请查看决策日志和页面状态，处理异常后再继续。"
+  };
+  // pendingApproval 是人工审批的真实业务信号，优先级高于可能滞后的 bootstrapStatus，
+  // 避免 Agent 已停在审批节点但工作台仍显示“匹配岗位/执行中”。
+  const rawStep = status?.ok === false ? "failed" : approval?.status === "pending" ? "awaiting_approval" : step;
+  const badge = $("agentPhaseBadge");
+  badge.textContent = phaseLabels[rawStep] || "执行中";
+  badge.className = `workspace-badge ${rawStep === "awaiting_approval" ? "approval" : rawStep === "done" ? "done" : rawStep === "failed" ? "failed" : rawStep === "idle" || rawStep === "awaiting_input" ? "idle" : "running"}`;
+  $("agentHeadline").textContent = headlineLabels[rawStep] || "Agent 正在执行任务";
+  $("agentMessage").textContent = rawStep === "awaiting_approval"
+    ? defaultMessages.awaiting_approval
+    : status?.message || defaultMessages[rawStep] || "Agent 正在观察页面并规划下一步动作。";
+
+  const rankedCount = state?.lastRankedJobs?.length || 0;
+  const candidateCount = state?.filteredCount || rankedCount || state?.candidateCount || 0;
+  const approvedCount = approval?.status === "pending" ? approval.jobs?.length || 0 : state?.approvedForGreet?.length || 0;
+  const greetedCount = state?.greeted?.length || 0;
+  const greetCap = state?.greetCap || 0;
+  const progressTotal = approvedCount || greetCap || candidateCount;
+  $("workspaceCandidateCount").textContent = String(candidateCount);
+  $("workspaceProgressCount").textContent = progressTotal ? `${greetedCount} / ${progressTotal}` : "0 / 0";
+  const pageLabels: Record<PageSnapshot["kind"], string> = {
+    jobs: "职位列表",
+    job_detail: "岗位详情",
+    login: "登录页",
+    unknown: "未识别"
+  };
+  $("workspaceCurrentPage").textContent = context ? pageLabels[context.snapshot.kind] : "未连接";
+  $("workspaceCost").textContent = `¥${Number(state?.costYuan || 0).toFixed(2)}`;
+}
+
+function renderProgress(status: BootstrapStatus | null, approval: ApprovalRequest | null = null): void {
   const order = ["find_jobs", "apply_filters", "extract_jobs", "filter_jobs", "rank_jobs", "awaiting_approval", "greeting", "awaiting_input", "done"];
-  const raw = String(status?.step || "idle");
+  const raw = approval?.status === "pending" ? "awaiting_approval" : String(status?.step || "idle");
   const current = raw === "awaiting_input" ? "awaiting_input" : raw === "done" ? "done" : raw === "idle" ? "find_jobs" : order.includes(raw) ? raw : "find_jobs";
   const currentIndex = order.indexOf(current);
   const label = current === "done" ? "已完成" : status?.ok === false ? "失败" : current === "awaiting_input" ? "等待补充岗位目标" : current === "awaiting_approval" ? "等待打招呼审批" : status?.message || "执行中";
@@ -203,20 +322,60 @@ function renderProgress(status: BootstrapStatus | null): void {
 
 function renderApproval(approval: ApprovalRequest | null): void {
   const card = $("approvalCard");
+  const approvalTab = $("tabApproval");
+  const approvalEmpty = $("approvalEmpty");
   if (!approval || approval.status !== "pending") {
     card.style.display = "none";
+    card.classList.remove("is-pending");
+    updateTabBadge("approvalTabBadge", 0);
+    approvalTab.classList.remove("needs-attention");
+    approvalEmpty.hidden = $("unknownCard").style.display !== "none";
+    renderedApprovalKey = "";
+    ($("approveAction") as HTMLButtonElement).disabled = false;
     return;
   }
   card.style.display = "block";
+  card.classList.add("is-pending");
+  approvalEmpty.hidden = true;
+  updateTabBadge("approvalTabBadge", approval.jobs?.length || 0, true);
+  if (autoFocusedApprovalId !== approval.id) {
+    autoFocusedApprovalId = approval.id;
+    activateTab("approval");
+  }
   $("approvalAction").textContent = approval.action;
   $("approvalDescription").textContent = `${approval.title}：${approval.description}`;
+  $("approvalBadge").textContent = `${approval.jobs?.length || 0} 个岗位待确认`;
   const jobsBody = $("approvalJobs");
   const jobs = approval.jobs || [];
+  const key = `${approval.id}|${jobs.map(job => `${job.url}:${job.score}:${job.reason || ""}`).join(";")}`;
+  if (key === renderedApprovalKey && jobsBody.querySelector("input[type='checkbox']")) {
+    updateApprovalSelectionSummary();
+    return;
+  }
+  const previousSelection = new Map<string, boolean>();
+  jobsBody.querySelectorAll<HTMLInputElement>("input[type='checkbox'][data-url]").forEach(input => {
+    previousSelection.set(input.dataset.url || "", input.checked);
+  });
   jobsBody.innerHTML = jobs.length
-    ? jobs.map(job => `<label class="approval-job"><input type="checkbox" data-url="${esc(job.url)}" checked /><span class="score">${esc(job.score)} 分</span><span class="company">${esc(job.company)}</span><span class="title">${esc(job.title)}</span><span class="reason">${esc(job.reason || job.matchedKeywords.join("、") || "")}</span></label>`).join("")
+    ? jobs.map(job => `<label class="approval-job"><input type="checkbox" data-url="${esc(job.url)}" ${previousSelection.has(job.url) ? previousSelection.get(job.url) ? "checked" : "" : "checked"} /><span class="score">${esc(job.score)} 分</span><span class="company">${esc(job.company)}</span><span class="title">${esc(job.title)}</span><span class="reason">${esc(job.reason || job.matchedKeywords.join("、") || "")}</span></label>`).join("")
     : `<p class="empty-cell">没有待审批的岗位</p>`;
+  renderedApprovalKey = key;
   ($("approveAction") as HTMLButtonElement).dataset.approvalId = approval.id;
   ($("rejectAction") as HTMLButtonElement).dataset.approvalId = approval.id;
+  updateApprovalSelectionSummary();
+}
+
+function updateApprovalSelectionSummary(): void {
+  const boxes = Array.from(document.querySelectorAll<HTMLInputElement>("#approvalJobs input[type='checkbox']"));
+  const selected = boxes.filter(box => box.checked).length;
+  const total = boxes.length;
+  const summary = $("approvalSummary");
+  if (!total) {
+    summary.textContent = "当前没有可审批的岗位。";
+  } else {
+    summary.textContent = `已选择 ${selected} / ${total} 个岗位；取消选择的岗位不会执行打招呼。`;
+  }
+  ($("approveAction") as HTMLButtonElement).disabled = selected === 0;
 }
 
 function renderUnknown(status: BootstrapStatus | null): void {
@@ -238,6 +397,21 @@ function renderUnknown(status: BootstrapStatus | null): void {
   }).join("");
 }
 
+function renderCompletionNotice(status: BootstrapStatus | null): void {
+  const notice = $("completionNotice");
+  const state = status?.state;
+  const completed = status?.step === "done" && state?.phase === "greet";
+  if (!completed) {
+    notice.hidden = true;
+    return;
+  }
+  const greeted = state?.greeted?.length || 0;
+  const cap = state?.greetCap || greeted;
+  notice.hidden = false;
+  $("completionTitle").textContent = cap && greeted >= cap ? "已完成 " + cap + " 个岗位打招呼" : "本轮打招呼已完成";
+  $("completionMessage").textContent = "本轮共确认发送 " + greeted + " 个岗位，可在“岗位结果”和“运行观测”中查看详情。";
+}
+
 function renderCostReadout(status: BootstrapStatus | null): void {
   const state = status?.state;
   if (!state) { $("costReadout").textContent = ""; return; }
@@ -247,6 +421,16 @@ function renderCostReadout(status: BootstrapStatus | null): void {
 }
 
 async function refresh(): Promise<void> {
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = refreshInternal();
+  try {
+    await refreshInFlight;
+  } finally {
+    refreshInFlight = null;
+  }
+}
+
+async function refreshInternal(): Promise<void> {
   const [settings, results, status, approval] = await Promise.all([
     runtimeMessage<Settings>({ type: "GET_SETTINGS" }),
     runtimeMessage<{ lastScanResults: Job[] }>({ type: "GET_SCAN_RESULTS" }),
@@ -255,9 +439,10 @@ async function refresh(): Promise<void> {
   ]);
   if (settings) renderSettings(settings);
   if (results?.lastScanResults) renderJobs(results.lastScanResults);
-  renderAgentStatus(status);
-  renderProgress(status);
+  renderAgentStatus(status, approval?.pendingApproval || null);
+  renderProgress(status, approval?.pendingApproval || null);
   renderCostReadout(status);
+  renderCompletionNotice(status);
   renderUnknown(status);
   const tab = await sourceTab();
   const contextRaw = tab?.id ? await tabsMessage<AgentContextSnapshot & { ok?: boolean; error?: string; snapshot?: PageSnapshot }>(tab.id, { type: "GET_AGENT_CONTEXT" }) : null;
@@ -265,6 +450,7 @@ async function refresh(): Promise<void> {
   // 只当确有 snapshot 字段才当 context，否则按 null 处理。
   const context = contextRaw && contextRaw.snapshot ? contextRaw : null;
   renderAgentContext(context, status);
+  renderAgentWorkspace(status, context, approval?.pendingApproval || null);
   if (status?.message) setNotice(status.message, status.ok === false);
   renderApproval(approval?.pendingApproval || null);
   const { agentLog = [] } = await chrome.storage.local.get({ agentLog: [] as string[] });
@@ -285,8 +471,7 @@ async function bootstrap(restart = true): Promise<void> {
   sourceTabId = tab.id;
   await chrome.storage.local.set({ agentSourceTabId: sourceTabId });
   await runtimeMessage({ type: "SET_BOOTSTRAP_STATUS", status: { ok: true, message: "正在启动 Agent…", step: "idle" } });
-  if (!(await waitForContentScript(tab.id))) {
-    setNotice("无法连接 BOSS 页面脚本，请刷新当前 BOSS 页面后重试", true);
+  if (!(await ensureContentScript(tab.id))) {
     button.disabled = false;
     return;
   }
@@ -329,6 +514,7 @@ $("settings").addEventListener("click", () => void chrome.runtime.openOptionsPag
 // 诊断快照：在不开 DevTools（BOSS 反调试会闪退）的前提下，直接在侧栏查看 content script
 // 对当前页的解析结果（snapshot.elements / currentQuery），并标注关键控件是否命中。
 $("diagSnapshot").addEventListener("click", async () => {
+  activateTab("observe");
   const out = $("diagOutput");
   out.hidden = false;
   out.textContent = "正在解析当前 BOSS 页面…";
@@ -380,6 +566,7 @@ $("diagSnapshot").addEventListener("click", async () => {
 // DOM 探测：采集真实 BOSS 的岗位容器/岗位卡/chip/导航祖先结构（outerHTML 片段），
 // 用于校准 snapshot 的选择器（诊断快照只给文本，这里给结构）。
 $("diagDom").addEventListener("click", async () => {
+  activateTab("observe");
   const out = $("diagOutput");
   out.hidden = false;
   out.textContent = "正在探测 BOSS DOM 结构…";
@@ -427,35 +614,6 @@ $("diagDom").addEventListener("click", async () => {
   out.innerHTML = lines.join("\n");
 });
 
-// 自动采集 BOSS 筛选下拉的真实选项（content script 自己 hover 每个筛选 chip，
-// 抓选项后关闭）。结果存 chrome.storage.filterOptions，后续用于把设置页改成"从选项里选"。
-$("collectOptions").addEventListener("click", async () => {
-  const out = $("diagOutput");
-  out.hidden = false;
-  const tab = await sourceTab();
-  if (!tab?.id) { out.textContent = "未找到 BOSS 标签页"; return; }
-  if (!collectListening) {
-    const r = await tabsMessage<{ ok?: boolean }>(tab.id, { type: "COLLECT_OPTIONS_LISTEN", action: "start" });
-    if (!r?.ok) { out.textContent = "启动监听失败（重载扩展+刷新 BOSS 页）"; return; }
-    collectListening = true;
-    document.getElementById("collectOptions")!.textContent = "■ 结束监听";
-    out.innerHTML = "监听中…请在 BOSS 页面依次 <b>hover 打开每个筛选下拉</b>（薪资/经验/学历/求职类型/行业/规模，每个停 1 秒）。<br>全部打开后回来点「结束监听」。";
-  } else {
-    const r = await tabsMessage<{ ok?: boolean; batches?: Array<Array<{ text: string; code: string }>> }>(tab.id, { type: "COLLECT_OPTIONS_LISTEN", action: "stop" });
-    collectListening = false;
-    document.getElementById("collectOptions")!.textContent = "采集筛选选项";
-    if (!r?.ok) { out.textContent = "结束失败"; return; }
-    const batches = r.batches || [];
-    if (!batches.length) { out.innerHTML = "未抓到任何选项。请确认：监听期间确实 hover 打开了下拉（面板展开了），且选项是 li/[role=option] 结构。"; return; }
-    const lines: string[] = [`抓到 ${batches.length} 批选项（请按 hover 顺序贴回：薪资→求职类型→经验→学历→规模→行业）：`];
-    batches.forEach((b: Array<{ text: string; code: string }>, i: number) => {
-      lines.push("", `【批次 ${i + 1}】（${b.length} 个）：`);
-      for (const x of b) lines.push(`  ${esc(x.text)}  →  ${esc(x.code || "（无码）")}`);
-    });
-    out.innerHTML = lines.join("\n");
-  }
-});
-
 for (const [id, kind] of [["approveAction", "approve"], ["rejectAction", "reject"]] as const) {
   $(id).addEventListener("click", async () => {
     const approvalId = ($(id) as HTMLButtonElement).dataset.approvalId;
@@ -481,26 +639,28 @@ $("unknownBody").addEventListener("click", async (event) => {
   await refresh();
 });
 
+$("approvalJobs").addEventListener("change", updateApprovalSelectionSummary);
+
+document.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach(button => {
+  button.addEventListener("click", () => activateTab(button.dataset.tab as DashboardTab));
+});
+activateTab(activeTab, false);
+
 async function init(): Promise<void> {
   // 不自动启动 Agent——由用户手动点「开始智能筛选」。避免一打开侧栏就自动跑。
   await refresh();
 }
 
-$("collectDimBtn").addEventListener("click", async () => {
-  const dimName: Record<string, string> = { jobTypes: "求职类型", targetSalary: "薪资", workExperience: "经验", education: "学历", companySizes: "规模", companyIndustries: "行业" };
-  const dim = (document.getElementById("collectDim") as HTMLSelectElement).value;
-  const out = $("diagOutput");
-  out.hidden = false;
-  out.textContent = `8 秒内请在 BOSS hover 打开「${dimName[dim] || dim}」下拉并保持展开…`;
-  const tab = await sourceTab();
-  if (!tab?.id) { out.textContent = "未找到 BOSS 标签页"; return; }
-  const r = await tabsMessage<{ ok?: boolean; items?: Array<{ text: string; code: string; tag?: string; cls?: string }>; error?: string }>(tab.id, { type: "COLLECT_DIM_CODES", dim });
-  if (!r?.ok) { out.textContent = `采集失败：${r?.error || "未响应（重载扩展+刷新）"}`; return; }
-  const lines = [`【${dimName[dim] || dim}】采到 ${r.items?.length || 0} 个：`];
-  for (const it of r.items || []) lines.push(`  ${it.text}  →  ${it.code || "（无码）"}  <${it.tag} .${it.cls || ""}>`);
-  out.textContent = lines.join("\n");
-  if (r.items?.length) await chrome.storage.local.set({ [`filterCodes_${dim}`]: r.items });
-});
-
 void init();
-setInterval(() => void refresh().catch(() => undefined), 1500);
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== "local") return;
+  const relevant = [
+    "bootstrapStatus", "agentState", "agentRecovery", "pendingApproval", "lastScanResults", "agentLog",
+    "jobKeywords", "targetLocations", "targetSalary", "jobTypes", "workExperience", "education",
+    "companyIndustries", "companySizes", "workMode", "aiEnabled", "agentAutoStart", "aiBaseUrl",
+    "aiModel", "aiApiKey", "costThresholdYuan", "inputPriceYuanPerMillion", "outputPriceYuanPerMillion",
+    "greetCap", "greetMessage"
+  ];
+  if (relevant.some(key => key in changes)) void refresh().catch(() => undefined);
+});

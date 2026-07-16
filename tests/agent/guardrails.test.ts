@@ -34,4 +34,11 @@ describe("recordAction", () => {
     s = recordAction(s, "click|1", "sig");
     expect(s.sameActionCount).toBe(0);
   });
+
+  it("does not carry a repeated-action count across different greet jobs", () => {
+    let s = newAgentState("r", null, "t");
+    s = recordAction(s, "click|e49", "jobs|greetIndex=5|greetUrl=job-a");
+    s = recordAction(s, "click|e49", "jobs|greetIndex=6|greetUrl=job-b");
+    expect(s.sameActionCount).toBe(0);
+  });
 });

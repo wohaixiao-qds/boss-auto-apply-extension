@@ -14,51 +14,40 @@
         <legend>岗位查询条件</legend>
         <div class="filter-grid">
           <div class="filter-field filter-field-wide">
-            <label for="jobKeywordsSelect">岗位关键词</label>
-            <div class="multi-select" id="jobKeywordsSelect" data-field="jobKeywords"></div>
-            <p class="field-hint">可多选，也可以搜索后添加自定义关键词</p>
+            <label for="jobKeywords">岗位关键词</label>
+            <input id="jobKeywords" placeholder="例如：ai agent 工程师；多个关键词用逗号分隔" />
           </div>
           <div class="filter-field">
-            <label for="targetLocationsSelect">目标城市</label>
+            <label for="targetLocations">目标城市</label>
             <div class="multi-select" id="targetLocationsSelect" data-field="targetLocations"></div>
           </div>
           <div class="filter-field">
-            <label for="targetSalarySelect">期望薪资</label>
+            <label for="targetSalary">期望薪资</label>
             <div class="multi-select" id="targetSalarySelect" data-field="targetSalary"></div>
           </div>
           <div class="filter-field">
-            <label for="jobTypesSelect">求职类型</label>
+            <label for="jobTypes">求职类型</label>
             <div class="multi-select" id="jobTypesSelect" data-field="jobTypes"></div>
           </div>
           <div class="filter-field">
-            <label for="workModeSelect">工作方式</label>
-            <div class="multi-select" id="workModeSelect" data-field="workMode"></div>
-          </div>
-          <div class="filter-field">
-            <label for="workExperienceSelect">工作经验</label>
+            <label for="workExperience">工作经验</label>
             <div class="multi-select" id="workExperienceSelect" data-field="workExperience"></div>
           </div>
           <div class="filter-field">
-            <label for="educationSelect">学历要求</label>
+            <label for="education">学历要求</label>
             <div class="multi-select" id="educationSelect" data-field="education"></div>
           </div>
           <div class="filter-field">
-            <label for="companyIndustriesSelect">公司行业</label>
+            <label for="companyIndustries">公司行业</label>
             <div class="multi-select" id="companyIndustriesSelect" data-field="companyIndustries"></div>
           </div>
           <div class="filter-field">
-            <label for="companySizesSelect">公司规模</label>
+            <label for="companySizes">公司规模</label>
             <div class="multi-select" id="companySizesSelect" data-field="companySizes"></div>
-          </div>
-          <div class="filter-field">
-            <label for="excludeCompaniesSelect">排除公司</label>
-            <div class="multi-select" id="excludeCompaniesSelect" data-field="excludeCompanies"></div>
-            <p class="field-hint">可添加多个不希望匹配的公司</p>
           </div>
         </div>
         <div class="number-grid">
           <label>最大翻页数<input id="maxPages" type="number" min="1" max="20" placeholder="5" /></label>
-          <label>最低匹配分数<input id="minMatchScore" type="number" min="0" max="100" /></label>
         </div>
       </fieldset>
 

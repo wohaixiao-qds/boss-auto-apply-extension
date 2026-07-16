@@ -39,6 +39,18 @@ describe("snapshotPage", () => {
     expect(node?.textContent).toContain("经验");
   });
 
+  it("keeps refs isolated when another observer creates a newer snapshot", () => {
+    document.body.innerHTML = `<div class="job-filter"><button id="first">第一批</button></div>`;
+    const first = snapshotPage();
+    const firstRef = first.elements.find(e => e.text === "第一批")!;
+
+    document.body.insertAdjacentHTML("beforeend", `<div class="job-filter"><button id="second">第二批</button></div>`);
+    const second = snapshotPage();
+
+    expect(resolveRef(firstRef.id, first.snapshotId)?.id).toBe("first");
+    expect(resolveRef(second.elements.find(e => e.text === "第二批")!.id, second.snapshotId)?.id).toBe("second");
+  });
+
   it("resolveRef returns null for detached node", () => {
     document.body.innerHTML = `<div class="job-filter"><a id="x">薪资</a></div>`;
     const snap = snapshotPage();
@@ -52,6 +64,38 @@ describe("snapshotPage", () => {
     document.body.innerHTML = `<ul class="job-list">${cards}</ul><div class="pager"><a class="next">下一页</a></div>`;
     const snap = snapshotPage();
     expect(snap.elements.some(e => e.region === "pager")).toBe(true);
+  });
+
+  it("keeps the greeting control after the job snapshot budget is exhausted", () => {
+    const cards = Array.from({ length: 40 }, (_, i) => `<li class="job-card-wrapper"><a href="/job_detail/${i}">job${i}</a></li>`).join("");
+    document.body.innerHTML = `
+      <div class="job-list-container job-card-box">
+        <ul class="job-list">${cards}</ul>
+        <div class="job-detail"><button>立即沟通</button></div>
+      </div>`;
+
+    const snap = snapshotPage();
+    const greet = snap.elements.find(e => e.text === "立即沟通");
+    expect(greet).toBeTruthy();
+    expect(greet?.region).toBe("job");
+    expect(resolveRef(greet!.id)?.textContent).toContain("立即沟通");
+  });
+
+  it("classifies BOSS detail controls as job controls before filter ancestors", () => {
+    document.body.innerHTML = `
+      <div class="filter-condition">
+        <div class="recommend-result-job">
+          <div class="job-detail-container">
+            <div class="job-detail-box">
+              <div class="job-detail-op"><a class="op-btn op-btn-chat" ka="cpc_job_list_chat_job123">立即沟通</a></div>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    const snap = snapshotPage();
+    const greet = snap.elements.find(e => e.text === "立即沟通");
+    expect(greet?.region).toBe("job");
+    expect(resolveRef(greet!.id)?.getAttribute("ka")).toBe("cpc_job_list_chat_job123");
   });
 
   it("keeps empty textarea with placeholder in chat region", () => {

@@ -77,6 +77,8 @@ export interface AgentState {
   visitedPageSignatures: string[];
   currentGreetIndex: number;
   currentGreetUrl: string;
+  /** 打招呼阶段的列表页入口；每个岗位完成后先回到这里再处理下一条。 */
+  greetListUrl: string;
   approvedForGreet: string[];
   greeted: string[];
   greetCap: number;
@@ -141,6 +143,10 @@ export interface Job {
   title: string; company: string; salary: string; location: string;
   description: string; url: string; score: number;
   matchedKeywords: string[]; reason?: string;
+  /** BOSS 岗位详情路径中的稳定岗位 ID，用于关联列表卡片、右侧详情和沟通按钮。 */
+  jobId?: string;
+  /** 采集该岗位时所在的 BOSS 列表页，用于列表页逐个打开岗位。 */
+  listUrl?: string;
 }
 
 export interface ApprovalRequest {
@@ -157,6 +163,7 @@ export interface AgentRecoveryMirror {
   approvedForGreet: string[];
   greeted: string[];
   currentGreetIndex: number;
+  greetListUrl?: string;
 }
 
 export interface AgentActionResult {
@@ -177,7 +184,7 @@ export interface BootstrapStatus {
 export interface AgentTools {
   getSettings(): Promise<Settings>;
   snapshot(): PageSnapshot;
-  resolveRef(ref: string): HTMLElement | null;
+  resolveRef(ref: string, snapshotId?: string): HTMLElement | null;
   planAction(payload: Record<string, unknown>): Promise<{ decision: AgentDecision; usage: { tokensIn: number; tokensOut: number; cumulativeYuan: number; estimated: boolean } }>;
   validateDecision(d: AgentDecision, ctx: import("./agent/validate").ValidationContext): { ok: boolean; reason: string };
   executeBrowserAction(d: AgentDecision, ctx: { phase: AgentPhase; greetMessage: string; forceGreetMessage: boolean }): Promise<AgentActionResult>;
@@ -187,6 +194,11 @@ export interface AgentTools {
   findJobsEntry(): Promise<HTMLElement | null>;
   navigate(element: HTMLElement): Promise<void>;
   navigateToUrl?(url: string): Promise<void>;
+  /** 在当前 BOSS 列表页按岗位信息选择卡片，而不是直接导航到详情 URL。 */
+  openJobFromList?(job: Job): Promise<AgentActionResult>;
+  /** 确认 BOSS 已发送招呼并关闭成功弹窗。 */
+  confirmAndDismissGreet?(): Promise<AgentActionResult>;
+  applyUrlFilters?(): Promise<AgentActionResult>;
   extractJobs(): Promise<Job[]>;
   filterJobs(jobs: Job[]): Promise<Job[]>;
   rankJobs(jobs: Job[]): Promise<Job[]>;

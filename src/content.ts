@@ -1,27 +1,76 @@
 import { AgentRunner } from "./agent/workflow";
 import { snapshotPage, resolveRef, classifyChip } from "./agent/snapshot";
 import { executeBrowserAction } from "./agent/browser-action";
+import { clickWithoutScriptNavigation } from "./agent/safe-click";
 import { validateDecision } from "./agent/validate";
 import { buildAgentIntent } from "./agent/intent";
+import { buildBossJobsUrl } from "./agent/boss-url";
 import type { AgentActionResult, AgentDecision, AgentTools, Job, RuntimeAction, Settings } from "./types";
+
+// 扩展重载后可能通过 chrome.scripting 再次注入本文件；页面内只允许一个 runner 真正执行动作。
+const contentScriptGlobal = globalThis as typeof globalThis & { __bossAutoApplyContentScript?: boolean };
+const isPrimaryContentScript = !contentScriptGlobal.__bossAutoApplyContentScript;
+if (isPrimaryContentScript) contentScriptGlobal.__bossAutoApplyContentScript = true;
 
 let contextDead = false;
 let listenTimer: ReturnType<typeof setInterval> | null = null;
-let listenBatches: Array<Array<{ text: string; code: string }>> = [];
+type CollectedOption = { text: string; code: string; sourceKey: string; tag: string; cls: string; outer: string; parentOuter: string };
+let listenBatches: Array<CollectedOption[]> = [];
 let listenBaseSet: Set<string> = new Set();
+
+function compactOuterHtml(element: Element | null, maxLength = 900): string {
+  return element?.outerHTML.replace(/\s+/g, " ").trim().slice(0, maxLength) || "";
+}
+
+function optionCode(element: HTMLElement, holder: Element | null = null): string {
+  const direct = element.dataset.val
+    || element.dataset.value
+    || element.getAttribute("value")
+    || element.getAttribute("data-code")
+    || holder?.getAttribute("data-val")
+    || holder?.getAttribute("data-value")
+    || holder?.getAttribute("value")
+    || holder?.getAttribute("data-code")
+    || "";
+  if (direct) return direct;
+  const ka = element.getAttribute("ka") || holder?.getAttribute("ka") || "";
+  return ka.match(/-(\d+)$/)?.[1] || ka;
+}
+
+function optionSourceKey(element: HTMLElement, holder: Element | null = null): string {
+  return element.getAttribute("ka")
+    || holder?.getAttribute("ka")
+    || element.getAttribute("data-val")
+    || element.getAttribute("data-value")
+    || element.getAttribute("data-code")
+    || holder?.getAttribute("data-val")
+    || holder?.getAttribute("data-value")
+    || holder?.getAttribute("data-code")
+    || "";
+}
 
 // 抓所有"可见叶子元素"的签名（不依赖固定选项选择器）。
 // 监听开始时建基线；用户 hover 打开下拉后，新出现的叶子 = 选项，不管它们什么 class/role。
-function grabVisibleLeaves(): Array<{ sig: string; text: string; code: string }> {
+function grabVisibleLeaves(): Array<CollectedOption & { sig: string }> {
   return [...document.querySelectorAll<HTMLElement>("a, button, li, span, div, p, label, [role='option'], [role='menuitem'], [role='menuitemcheckbox'], [data-val], [data-value]")]
     .filter(el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== "hidden"; })
     .filter(el => el.childElementCount === 0 || el.tagName === "LI" || el.tagName === "OPTION" || el.tagName === "A" || el.tagName === "BUTTON" || el.hasAttribute("data-val") || el.hasAttribute("data-value"))
     .map(el => {
       const text = (el.innerText || el.textContent || "").trim().replace(/\s+/g, " ").slice(0, 40);
-      // 码在选项自身或最近 li/option/[data-val] 容器上
-      const holder = el.closest("li, [role='option'], [data-val], [data-value]") || el;
-      const code = el.dataset.val || el.dataset.value || el.getAttribute("value") || holder?.getAttribute("data-val") || holder?.getAttribute("data-value") || holder?.getAttribute("value") || "";
-      return { sig: `${text}|${el.tagName}|${(el.className?.toString?.() || "").slice(0, 24)}`, text, code: String(code || "") };
+      // 码在选项自身、容器属性或 BOSS 的 ka="...-数字" 属性上
+      const holder = el.closest("li, [role='option'], [data-val], [data-value], [data-code], [ka]") || el;
+      const code = optionCode(el, holder);
+      const sourceKey = optionSourceKey(el, holder);
+      return {
+        sig: `${text}|${sourceKey}|${code}|${el.tagName}|${(el.className?.toString?.() || "").slice(0, 24)}`,
+        text,
+        code: String(code || ""),
+        sourceKey,
+        tag: el.tagName.toLowerCase(),
+        cls: (el.className?.toString?.() || "").slice(0, 120),
+        outer: compactOuterHtml(el),
+        parentOuter: compactOuterHtml(el.parentElement, 1200)
+      };
     })
     .filter(x => x.text);
 }
@@ -46,6 +95,24 @@ const isVisible = <T extends Element>(node: T | null): node is T => {
   const rect = node?.getBoundingClientRect();
   return Boolean(node && rect && rect.width > 0 && rect.height > 0 && getComputedStyle(node).visibility !== "hidden");
 };
+
+function isJobDetailUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value, globalThis.location.href);
+    return /(^|\/)job_detail\//i.test(parsed.pathname) || /(^|\/)job\//i.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function jobIdFromUrl(value: string): string {
+  try {
+    const parsed = new URL(value, globalThis.location.href);
+    return parsed.pathname.split("/").filter(Boolean).pop()?.replace(/\.html$/i, "") || "";
+  } catch {
+    return "";
+  }
+}
 
 function wait(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -90,7 +157,7 @@ function hasJobCards(): boolean {
 
 async function getSettings(): Promise<Settings> {
   return await runtimeMessage<Settings>({ type: "GET_SETTINGS" }) || {
-    jobKeywords: "", excludeCompanies: "", targetLocations: "", targetSalary: "", workMode: "", jobTypes: "", workExperience: "", education: "", companyIndustries: "", companySizes: "", maxPages: "5", minMatchScore: "50", candidateProfileClean: "",
+    jobKeywords: "", excludeCompanies: "", targetLocations: "", targetSalary: "", workMode: "", jobTypes: "", workExperience: "", education: "", companyIndustries: "", companySizes: "", maxPages: "5", minMatchScore: "0", candidateProfileClean: "",
     jobIntent: { targetTitles: [], skills: [], locations: [], salary: "", workModes: [], summary: "" }, profileSyncedAt: "", aiEnabled: false, agentAutoStart: false,
     aiBaseUrl: "", aiModel: "", aiApiKey: "",
     costThresholdYuan: "5", inputPriceYuanPerMillion: "0", outputPriceYuanPerMillion: "0", greetCap: "10", greetMessage: ""
@@ -131,8 +198,12 @@ async function extractVisibleJobs(): Promise<Job[]> {
     const card = cardFor(node);
     if (seen.has(card)) continue;
     seen.add(card);
-    const link = card.matches("a[href]") ? card as HTMLAnchorElement : card.querySelector<HTMLAnchorElement>("a[href*='/job_detail/'], a[href*='/job/'], a[href]");
+    const link = card.matches("a[href]") && isJobDetailUrl((card as HTMLAnchorElement).href)
+      ? card as HTMLAnchorElement
+      : card.querySelector<HTMLAnchorElement>("a[href*='/job_detail/'], a[href^='/job/'], a[href*='zhipin.com/job/']");
     if (!link?.href) continue;
+    // 公司主页 /gongsi/...、公司职位页等不是岗位详情，不能进入候选池。
+    if (!isJobDetailUrl(link.href)) continue;
     const title = firstText(card, [".job-name", ".job-title", "h3", "h2"]) || textOf(link).split("\n")[0];
     const company = firstText(card, [".company-name", ".company", "[class*='company']"]) || "未识别公司";
     const salary = firstText(card, [".salary", ".job-salary", "[class*='salary']"]);
@@ -146,7 +217,8 @@ async function extractVisibleJobs(): Promise<Job[]> {
     const titleScore = matchedKeywords.some(item => normalize(title).includes(item)) ? 15 : 0;
     const locationScore = locationOk ? 15 : 0;
     const score = Math.min(100, Math.round(keywordScore + titleScore + locationScore));
-    const job: Job = { title, company, salary, location, description: description.slice(0, 2200), url: link.href.split("#")[0], score, matchedKeywords };
+    const url = link.href.split("#")[0];
+    const job: Job = { title, company, salary, location, description: description.slice(0, 2200), url, jobId: jobIdFromUrl(url), score, matchedKeywords, listUrl: globalThis.location.href.split("#")[0] };
     if (title) jobs.push(job);
   }
   return jobs.filter((job, index, list) => list.findIndex(item => item.url === job.url) === index).sort((a, b) => b.score - a.score);
@@ -171,40 +243,181 @@ function findNextPage(): HTMLElement | null {
 
 async function filterJobs(jobs: Job[]): Promise<Job[]> {
   const settings = await getSettings();
-  const locations = linesOf(settings.targetLocations || settings.jobIntent.locations.join("\n")).map(normalize);
   const excluded = linesOf(settings.excludeCompanies).map(normalize);
-  const minimum = Number(settings.minMatchScore || 0);
-  const experience = linesOf(settings.workExperience).map(normalize);
-  const education = linesOf(settings.education).map(normalize);
-  const industries = linesOf(settings.companyIndustries).map(normalize);
-  const companySizes = linesOf(settings.companySizes).map(normalize);
-  const workModes = linesOf(settings.workMode || settings.jobIntent.workModes.join("\n")).map(normalize);
-  const conditionMatches = (values: string[], text: string, signal: RegExp): boolean => {
-    if (!values.length) return true;
-    if (values.some(value => text.includes(value))) return true;
-    return !signal.test(text);
-  };
+  // BOSS URL/页面已经完成关键词、城市、薪资、求职类型、经验和学历筛选。
+  // 岗位卡片的 location/经验/学历等字段经常不完整，不能再用文本启发式二次过滤，
+  // 否则明明有岗位也会被错误过滤成 0 个。BOSS 不支持的“排除公司”仍由本地处理。
   return jobs.filter(job => {
-    const text = normalize(`${job.title} ${job.company} ${job.salary} ${job.location} ${job.description}`);
-    const locationOk = !locations.length || locations.some(item => normalize(job.location).includes(item));
     const excludedCompany = excluded.some(item => normalize(job.company).includes(item));
-    const experienceOk = conditionMatches(experience, text, /不限经验|无经验|应届|\d+年/i);
-    const educationOk = conditionMatches(education, text, /不限学历|大专|本科|硕士|博士/i);
-    const industryOk = conditionMatches(industries, text, /互联网|软件|金融|教育|医疗|制造|零售/i);
-    const companySizeOk = conditionMatches(companySizes, text, /少于15人|15-50人|50-150人|150-500人|500-2000人|2000人以上/i);
-    const workModeOk = conditionMatches(workModes, text, /全职|兼职|远程|混合办公|现场/i);
-    return locationOk && !excludedCompany && experienceOk && educationOk && industryOk && companySizeOk && workModeOk && job.score >= minimum;
+    return !excludedCompany;
   }).sort((a, b) => b.score - a.score);
 }
 
 async function rankJobs(jobs: Job[]): Promise<Job[]> {
-  const settings = await getSettings();
   const ranking = await runtimeMessage<{ ok: boolean; ranking?: Array<{ url: string; score: number; reason: string }>; reason?: string; error?: string }>({ type: "RANK_JOBS", jobs });
   if (!ranking?.ok || !ranking.ranking?.length) return jobs.map(job => ({ ...job, reason: ranking?.reason || "规则匹配" }));
   const map = new Map(ranking.ranking.map(item => [item.url, item]));
   return jobs.map(job => ({ ...job, score: map.get(job.url)?.score ?? job.score, reason: map.get(job.url)?.reason || "规则匹配" }))
-    .filter(job => job.score >= Number(settings.minMatchScore || 0))
     .sort((a, b) => b.score - a.score);
+}
+
+async function applyUrlFilters(): Promise<AgentActionResult> {
+  const settings = await getSettings();
+  const stored = await chrome.storage.local.get({ filterOptions: {} }) as { filterOptions?: import("./agent/boss-url").CollectedUrlOptions };
+  const built = buildBossJobsUrl(location.href, settings, stored.filterOptions || {});
+  const details = [
+    built.applied.length ? `已写入 ${built.applied.join("、")}` : "没有可参数化的岗位条件",
+    built.missing.length ? `未映射 ${built.missing.join("；")}` : "",
+    built.unsupported.length ? built.unsupported.join("；") : ""
+  ].filter(Boolean).join("；");
+  if (built.url === location.href) return { ok: true, message: `URL 筛选条件已存在：${details}` };
+  const response = await runtimeMessage<{ ok?: boolean; error?: string }>({ type: "NAVIGATE_SOURCE_TAB", url: built.url });
+  if (!response?.ok) return { ok: false, message: response?.error || "无法跳转到 URL 筛选结果" };
+  return { ok: true, message: `正在通过 URL 应用筛选：${details}`, pageMayChange: true, partial: Boolean(built.missing.length || built.unsupported.length) };
+}
+
+async function openJobFromList(job: Job): Promise<AgentActionResult> {
+  const target = (() => { try { return new URL(job.url, globalThis.location.href); } catch { return null; } })();
+  const targetPath = target?.pathname.replace(/\/+$/, "") || "";
+  const targetId = targetPath.split("/").filter(Boolean).pop() || "";
+  const targetJobId = (job.jobId || targetId).replace(/\.html$/i, "");
+  const titleKey = normalize(job.title);
+  const companyKey = normalize(job.company === "未识别公司" ? "" : job.company);
+  const salaryKey = normalize(job.salary);
+  const locationKey = normalize(job.location);
+  const selector = "a[href*='/job_detail/'], a[href^='/job/'], a[href*='zhipin.com/job/']";
+  const sameUrl = (href: string): boolean => {
+    try {
+      const candidate = new URL(href, globalThis.location.href);
+      if (!/(^|\.)zhipin\.com$/i.test(candidate.hostname) || !target) return false;
+      return candidate.pathname.replace(/\/+$/, "") === targetPath;
+    } catch {
+      return false;
+    }
+  };
+  const jobCardSelector = ".job-card-wrap, .job-card-box, .job-card-wrapper, .job-primary, [ka='job-card'], [data-jobid], [class*='job-card']";
+  const findImmediateGreetButton = (): HTMLElement | null => {
+    const candidates = [...document.querySelectorAll<HTMLElement>("button, a, [role='button'], [class*='btn']")]
+      .filter(element => isVisible(element) && /立即沟通/.test(textOf(element)));
+    const score = (element: HTMLElement): number => {
+      const ka = element.getAttribute("ka") || "";
+      let value = 0;
+      if (targetJobId && ka.endsWith(targetJobId)) value += 100;
+      if (element.matches(".op-btn-chat, [ka^='cpc_job_list_chat_']")) value += 20;
+      if (element.closest(".job-detail-op, .job-detail-header, .job-detail-box, .job-detail-container, [class*='job-detail']")) value += 10;
+      if (element.tagName === "BUTTON" || element.getAttribute("role") === "button") value += 3;
+      return value;
+    };
+    return candidates.sort((a, b) => score(b) - score(a))[0] || null;
+  };
+  const hasImmediateGreetButton = (): boolean => Boolean(findImmediateGreetButton());
+  const cardIsSelected = (card: HTMLElement | null): boolean => {
+    if (!card) return false;
+    const markers = [
+      card,
+      card.parentElement,
+      card.closest("li, [role='option'], [role='listitem']")
+    ].filter((element): element is HTMLElement => Boolean(element));
+    return markers.some(element => element.getAttribute("aria-selected") === "true"
+      || element.getAttribute("aria-current") === "true"
+      || /selected|active|current/.test(String(element.className || "").toLowerCase()));
+  };
+  const detailSignature = (): string => [...document.querySelectorAll<HTMLElement>(
+    ".job-detail, .job-detail-box, .job-detail-container, [class*='job-detail'], [class*='job-detail-content'], [class*='job-detail-main']"
+  )].filter(isVisible).map(textOf).join("|").slice(0, 2000);
+  const detailShowsTitle = (card: HTMLElement | null): boolean => {
+    if (!card || titleKey.length < 4) return false;
+    const button = findImmediateGreetButton();
+    let node: HTMLElement | null = button;
+    for (let depth = 0; node && depth < 7; depth += 1, node = node.parentElement) {
+      const detailText = normalize(textOf(node));
+      if (detailText.includes(titleKey) && (!salaryKey || detailText.includes(salaryKey))) return true;
+    }
+    return false;
+  };
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const cards = [...document.querySelectorAll<HTMLElement>(jobCardSelector)].filter(isVisible);
+    const scoredCards = cards.map(card => {
+      const text = normalize(textOf(card));
+      let score = 0;
+      if (titleKey.length >= 4 && text.includes(titleKey)) score += 8;
+      if (companyKey.length >= 2 && text.includes(companyKey)) score += 5;
+      if (salaryKey.length >= 2 && text.includes(salaryKey)) score += 3;
+      if (locationKey.length >= 2 && text.includes(locationKey)) score += 1;
+      return { card, score };
+    }).sort((a, b) => b.score - a.score);
+    const matchedCard = scoredCards.find(item => item.score >= (titleKey.length >= 4 ? 8 : 3))?.card || null;
+    const link = matchedCard?.querySelector<HTMLAnchorElement>(selector)
+      || matchedCard?.querySelector<HTMLAnchorElement>("a[href]")
+      || [...document.querySelectorAll<HTMLAnchorElement>(selector)].find(element => {
+        if (!sameUrl(element.href)) return false;
+        const card = element.closest(jobCardSelector);
+        return isVisible(element) || isVisible(card);
+      }) || null;
+    if (link) {
+      const rawCard = matchedCard || link.closest<HTMLElement>(jobCardSelector);
+      const wasSelected = cardIsSelected(rawCard);
+      const beforeDetail = detailSignature();
+      // BOSS 的列表页是“左侧卡片 + 右侧详情”的单页结构。
+      // 不能点击详情 <a>，否则会触发详情导航；应点击卡片表面，让 BOSS 切换右侧详情。
+      const surface = rawCard && rawCard.tagName !== "A"
+        ? rawCard
+        : rawCard?.parentElement || link;
+      surface.scrollIntoView({ block: "center", behavior: "instant" as ScrollBehavior });
+      const eventInit: MouseEventInit = { bubbles: true, cancelable: true, view: window };
+      surface.dispatchEvent(new MouseEvent("mousedown", eventInit));
+      surface.dispatchEvent(new MouseEvent("mouseup", eventInit));
+      surface.dispatchEvent(new MouseEvent("click", eventInit));
+      await wait(350);
+      // 某些 BOSS 版本把选择逻辑绑定在详情链接的 click handler 上，但默认行为会导航。
+      // 允许站点 handler 执行，同时阻止默认详情导航，仍留在列表页切换右侧详情。
+      if (!wasSelected) {
+        const preventDetailNavigation = (event: Event): void => {
+          const targetElement = event.target instanceof Element ? event.target.closest("a") : null;
+          if (targetElement && sameUrl((targetElement as HTMLAnchorElement).href)) event.preventDefault();
+        };
+        document.addEventListener("click", preventDetailNavigation, true);
+        try {
+          clickWithoutScriptNavigation(link);
+        } finally {
+          document.removeEventListener("click", preventDetailNavigation, true);
+        }
+        await wait(450);
+      }
+      const selected = wasSelected || cardIsSelected(rawCard) || detailSignature() !== beforeDetail;
+      const targetDetailReady = detailShowsTitle(rawCard);
+      if (hasImmediateGreetButton() && (selected || targetDetailReady)) {
+        return { ok: true, message: `已在当前列表页按岗位信息选择并确认右侧详情（${job.title}）`, pageMayChange: false };
+      }
+      return { ok: false, message: `已找到岗位卡片，但未确认右侧详情与“${job.title}”对应` };
+    }
+    await wait(250);
+  }
+  const visibleCards = [...document.querySelectorAll<HTMLElement>(jobCardSelector)].filter(isVisible).length;
+  return { ok: false, message: `列表已加载但没有匹配到目标岗位卡片（目标 ${targetId || targetPath}，当前可见卡片 ${visibleCards} 个）` };
+}
+
+async function confirmAndDismissGreet(): Promise<AgentActionResult> {
+  const successPattern = /已向\s*BOSS\s*发送消息|已发送消息|发送成功|消息已发出/;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const successNode = [...document.querySelectorAll<HTMLElement>("div, section, p, span, strong, h1, h2, h3")]
+      .find(element => isVisible(element) && textOf(element).length <= 500 && successPattern.test(textOf(element)));
+    if (successNode) {
+      const dialog = successNode.closest<HTMLElement>("[role='dialog'], [class*='dialog'], [class*='modal'], [class*='layer'], [class*='popup']")
+        || successNode.parentElement?.parentElement
+        || successNode.parentElement;
+      const button = (dialog ? [...dialog.querySelectorAll<HTMLElement>("button, [role='button'], a, [class*='btn']")] : [])
+        .find(element => isVisible(element) && /留在此页|关闭|close|×/i.test(textOf(element) || element.getAttribute("aria-label") || ""));
+      if (button) {
+        clickWithoutScriptNavigation(button);
+        await wait(350);
+        return { ok: true, message: "已确认 BOSS 发送招呼成功并关闭弹窗" };
+      }
+      return { ok: false, message: "已检测到发送成功提示，但未找到弹窗关闭按钮" };
+    }
+    await wait(250);
+  }
+  return { ok: false, message: "未检测到 BOSS 的发送成功确认弹窗" };
 }
 
 const tools: AgentTools = {
@@ -242,7 +455,7 @@ const tools: AgentTools = {
       void runtimeMessage({ type: "NAVIGATE_SOURCE_TAB", url: href });
       return;
     }
-    element.click();
+    clickWithoutScriptNavigation(element);
   },
   navigateToUrl: async (url: string) => {
     // Phase B Runtime 打开已批准岗位：交给 background 在源标签页导航（同源 zhipin）。
@@ -251,6 +464,9 @@ const tools: AgentTools = {
     if (!/(^|\.)zhipin\.com$/i.test(parsed.hostname)) throw new Error("非 zhipin 域，已拒绝导航");
     await runtimeMessage({ type: "NAVIGATE_SOURCE_TAB", url: parsed.href });
   },
+  applyUrlFilters,
+  openJobFromList,
+  confirmAndDismissGreet,
   extractJobs: extractVisibleJobs,
   filterJobs,
   rankJobs,
@@ -327,20 +543,24 @@ chrome.runtime.onMessage.addListener((message: any, _sender, sendResponse) => {
       listenTimer = setInterval(() => {
         const fresh = grabVisibleLeaves().filter(x => !listenBaseSet.has(x.sig));
         if (fresh.length < 2) return;
-        const key = fresh.map(x => x.sig).slice().sort().join("|");
         const last = listenBatches[listenBatches.length - 1];
-        if (!last || last.map(x => x.text).slice().sort().join("|") !== fresh.map(x => x.text).slice().sort().join("|")) {
+        if (!last || last.map(x => `${x.text}|${x.code}`).slice().sort().join("|") !== fresh.map(x => `${x.text}|${x.code}`).slice().sort().join("|")) {
           const seen = new Set<string>();
-          const items = fresh.map(x => ({ text: x.text, code: x.code })).filter(it => { if (seen.has(it.text)) return false; seen.add(it.text); return true; });
+          // 行业下拉会同时出现分组标题（无编码）和真实叶子选项（有 ka 编码）。
+          // 只要本批存在编码项，就排除无编码的分组标题；城市批次全是文本时保留文本。
+          const candidates = fresh.some(item => item.code || item.sourceKey) ? fresh.filter(item => item.code || item.sourceKey) : fresh;
+          const items = candidates.filter(it => { const itemKey = `${it.text}|${it.sourceKey}|${it.code}`; if (seen.has(itemKey)) return false; seen.add(itemKey); return true; });
           listenBatches.push(items);
+          // 当前批次已记录，下一批只比较新出现的选项，避免把上一批重复带入。
+          listenBaseSet = new Set(grabVisibleLeaves().map(x => x.sig));
         }
       }, 400);
       sendResponse({ ok: true });
     } else {
       if (listenTimer) { clearInterval(listenTimer); listenTimer = null; }
       const seen = new Set<string>();
-      const dedup: Array<Array<{ text: string; code: string }>> = [];
-      for (const b of listenBatches) { const k = b.map(x => x.text).slice().sort().join("|"); if (!seen.has(k)) { seen.add(k); dedup.push(b); } }
+      const dedup: Array<CollectedOption[]> = [];
+      for (const b of listenBatches) { const k = b.map(x => `${x.text}|${x.code}`).slice().sort().join("|"); if (!seen.has(k)) { seen.add(k); dedup.push(b); } }
       sendResponse({ ok: true, batches: dedup });
     }
     return true;
@@ -354,7 +574,12 @@ chrome.runtime.onMessage.addListener((message: any, _sender, sendResponse) => {
     const grabOpts = () => [...document.querySelectorAll<HTMLElement>("a, button, li, span, div, p, label, [role='option'], [data-val], [data-value]")]
       .filter(el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
       .filter(el => el.childElementCount === 0 || el.tagName === "LI" || el.tagName === "OPTION" || el.tagName === "A" || el.tagName === "BUTTON" || el.hasAttribute("data-val") || el.hasAttribute("data-value"))
-      .map(el => ({ sig: `${(el.innerText || el.textContent || "").trim().slice(0, 40)}|${el.tagName}|${(el.className?.toString?.() || "").slice(0, 24)}`, el, text: (el.innerText || el.textContent || "").trim().replace(/\s+/g, " ").slice(0, 40) }))
+      .map(el => {
+        const holder = el.closest("li, [role='option'], [data-val], [data-value], [data-code], [ka]") || el;
+        const text = (el.innerText || el.textContent || "").trim().replace(/\s+/g, " ").slice(0, 40);
+        const code = optionCode(el, holder);
+        return { sig: `${text}|${code}|${el.tagName}|${(el.className?.toString?.() || "").slice(0, 24)}`, el, text, code };
+      })
       .filter(x => x.text);
     const baseSet = new Set(grabOpts().map(x => x.sig));
     let done = false;
@@ -363,11 +588,12 @@ chrome.runtime.onMessage.addListener((message: any, _sender, sendResponse) => {
       const fresh = grabOpts().filter(x => !baseSet.has(x.sig));
       if (fresh.length < 2) return;
       const seen = new Set<string>();
-      const items = fresh.map(x => {
-        const holder = x.el.closest("li, [role='option'], [data-val], [data-value]") || x.el;
-        const code = x.el.dataset.val || x.el.dataset.value || x.el.getAttribute("value") || holder?.getAttribute("data-val") || holder?.getAttribute("data-value") || holder?.getAttribute("value") || "";
-        return { text: x.text, code: String(code || ""), tag: x.el.tagName, cls: (x.el.className?.toString?.() || "").slice(0, 40) };
-      }).filter(it => { if (seen.has(it.text)) return false; seen.add(it.text); return true; });
+      const items = fresh.map(x => ({
+        text: x.text,
+        code: String(x.code || ""),
+        tag: x.el.tagName,
+        cls: (x.el.className?.toString?.() || "").slice(0, 40)
+      })).filter(it => { const itemKey = `${it.text}|${it.code}`; if (seen.has(itemKey)) return false; seen.add(itemKey); return true; });
       finish({ ok: true, dim, items });
     }, 400);
     const timeout = setTimeout(() => finish({ ok: false, error: "8 秒内未抓到选项，请确认 hover 打开了对应下拉" }), 9000);
@@ -379,11 +605,11 @@ chrome.runtime.onMessage.addListener((message: any, _sender, sendResponse) => {
   }
   if (message.type === "AUTOMATE_BOOTSTRAP") {
     sendResponse({ ok: true, pending: true, message: "Agent 已开始执行" });
-    void runner.start(Boolean(message.restart));
+    if (isPrimaryContentScript) void runner.start(Boolean(message.restart));
     return false;
   }
   if (message.type === "RESET_AGENT") {
-    runner.reset();
+    if (isPrimaryContentScript) runner.reset();
     sendResponse({ ok: true });
     return false;
   }
@@ -394,7 +620,7 @@ chrome.runtime.onMessage.addListener((message: any, _sender, sendResponse) => {
   if (message.type === "RESUME_AGENT") {
     // 审批通过后由 background 触发；resume() 会从 chrome.storage.local 镜像合并恢复数据后继续循环。
     sendResponse({ ok: true });
-    void runner.resume();
+    if (isPrimaryContentScript) void runner.resume();
     return false;
   }
   if (message.type === "RESOLVE_UNKNOWN_GREET") {
@@ -402,7 +628,7 @@ chrome.runtime.onMessage.addListener((message: any, _sender, sendResponse) => {
     const url = typeof message.url === "string" ? message.url : "";
     const verdict = message.verdict === "sent" ? "sent" : "skipped";
     sendResponse({ ok: true });
-    if (url) {
+    if (isPrimaryContentScript && url) {
       runner.resolveUnknownGreet(url, verdict);
       void runner.resume();
     }
@@ -411,4 +637,4 @@ chrome.runtime.onMessage.addListener((message: any, _sender, sendResponse) => {
   return false;
 });
 
-void runner.resume();
+if (isPrimaryContentScript) void runner.resume();
