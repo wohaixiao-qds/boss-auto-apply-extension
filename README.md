@@ -1,108 +1,47 @@
-# BOSS 求职 Agent
+# BOSS 自动打招呼侧边栏插件
 
-一个基于 Chrome MV3、TypeScript 和 LLM 的 BOSS 求职助手。Agent 会观察当前 BOSS 页面，结合用户预设的岗位查询条件，自主决定下一步页面动作，完成岗位筛选、翻页采集，并在人工批准后逐个执行“立即沟通”。
+这是一个基于 Chrome Manifest V3、WXT、React、TypeScript 和 Radix Themes 的本地插件原型。
 
-## 当前能力
+插件通过 Chrome Side Panel 工作，不会在 BOSS 页面注入浮层或覆盖页面内容。用户在 BOSS 职位列表中完成筛选后，从浏览器右侧打开插件，扫描职位、审核列表，再按顺序执行打招呼。
 
-- 使用 BOSS 风格的下拉多选配置岗位关键词、城市、薪资、求职类型、经验、学历、行业和公司规模。
-- 通过 BOSS URL 参数应用稳定的查询条件，避免依赖容易失效的 hover 下拉 DOM。
-- 读取当前列表页岗位并自动翻页、合并和去重。
-- 使用 LLM 根据页面快照判断当前处于哪里、下一步应该做什么。
-- 使用岗位 ID 关联左侧列表卡片、右侧详情和“立即沟通”按钮。
-- 保持在 BOSS 列表页内逐个切换岗位，不通过岗位详情 URL 跨页执行打招呼。
-- 每次点击“立即沟通”后等待 BOSS 成功反馈，确认成功后再进入下一个岗位。
-- 在人工审批节点暂停，用户可以勾选或取消岗位后批准。
-- 控制页提供 Agent 概览、人工审批、岗位结果和运行观测 Tab。
-- 扩展重载后自动尝试重新注入 BOSS 页面脚本，不再把刷新 BOSS 页面作为唯一启动条件。
-- 具备状态恢复、费用阈值、重复动作检测和非法决策暂停保护。
+## 本地运行
 
-## 工作流程
+要求 Node.js 20 LTS 或更高版本。
 
-~~~text
-BOSS 页面观察
-      ↓
-LLM 判断当前页面和下一步动作
-      ↓
-应用关键词与筛选条件
-      ↓
-采集岗位并自动翻页
-      ↓
-按用户硬约束过滤岗位
-      ↓
-申请人工审批
-      ↓
-用户选择岗位并批准
-      ↓
-列表页逐个选择岗位 → 点击“立即沟通” → 等待成功确认
-~~~
-
-高风险的打招呼操作不会在未获得人工批准时执行。
-
-## 安装与构建
-
-要求：
-
-- Node.js 18 或更高版本
-- Google Chrome
-- 一个兼容 OpenAI Chat Completions 的模型接口
-
-安装依赖并构建：
-
-~~~bash
+```bash
 npm install
 npm run build
-~~~
+```
 
-然后：
+生成给他人安装的免费 ZIP 包：
 
-1. 打开 chrome://extensions/。
+```bash
+npm run package
+```
+
+ZIP 会生成在 `release/boss-auto-greeting.zip`。对方解压后，在 `chrome://extensions/` 开启开发者模式，选择解压后的、直接包含 `manifest.json` 的文件夹。
+
+然后在 Chrome 中：
+
+1. 打开 `chrome://extensions/`。
 2. 开启“开发者模式”。
 3. 点击“加载已解压的扩展程序”。
-4. 选择项目生成的 dist/ 目录。
-5. 修改代码后重新执行 npm run build，再在扩展管理页点击“重新加载”。
+4. 选择项目的 `.output/chrome-mv3` 目录。
+5. 打开已登录的 BOSS 直聘职位列表，点击扩展图标打开侧边栏。
 
-## 配置
+开发期间可以使用：
 
-打开扩展设置页，配置：
+```bash
+npm run dev
+npm run typecheck
+npm test
+```
 
-- 岗位关键词和 BOSS 查询条件
-- 最大翻页数
-- API Base URL、模型名称和 API Key
-- LLM 费用阈值及输入输出单价
-- 每轮打招呼上限
-- 固定打招呼话术
+## 当前实现边界
 
-保存设置后，打开已登录的 BOSS 页面，点击扩展图标进入侧栏，点击“开始智能筛选”。
-
-正常情况下不需要手动刷新 BOSS 页面。若扩展刚刚重新加载，控制页会先尝试自动注入 content.js；只有注入失败时才需要刷新页面。
-
-## 开发命令
-
-~~~bash
-npm run typecheck  # TypeScript 类型检查
-npm test           # 运行测试
-npm run build      # 类型检查并构建 dist/
-git diff --check   # 检查空白错误
-~~~
-
-## 目录结构
-
-~~~text
-src/
-  agent/              Agent 状态机、意图、快照、校验和浏览器动作
-  background.ts       Service Worker、LLM 请求和 chrome.storage 协调
-  content.ts          BOSS 页面观察与 DOM 操作
-  dashboard.*         侧栏控制台
-  options.*           岗位筛选与模型设置页
-  types.ts            共享类型定义
-scripts/build.mjs     构建脚本
-tests/                Agent、DOM 快照和浏览器动作测试
-~~~
-
-## 安全与限制
-
-- 插件不会使用 chrome.debugger 或 CDP。
-- 页面内容只作为观察数据传给 Agent，不作为执行指令。
-- 打招呼使用用户配置的固定话术，不由网页文本覆盖。
-- 页面 DOM 和 BOSS 的内部结构可能变化，必要时可使用控制页的“诊断快照”和“DOM 探测”排查。
-- 请遵守 BOSS 的服务条款和频率限制，并在真实账号上谨慎设置打招呼上限。
+- 只使用本地 Chrome Storage，不接入后端或 AI。
+- 打招呼操作复用 BOSS 页面已有的默认话术。
+- 发送前需要在侧边栏审核并点击确认。
+- 任务按职位列表顺序执行，并使用随机间隔和单批上限。
+- 检测到验证码、登录失效或平台频率限制时自动暂停。
+- BOSS 页面 DOM 结构变化时，需要更新 `entrypoints/boss.content.ts` 中的识别选择器。

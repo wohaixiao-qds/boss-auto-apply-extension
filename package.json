@@ -1,19 +1,31 @@
 {
-  "name": "boss-auto-apply-extension",
-  "version": "0.3.0",
+  "name": "boss-greeting-sidepanel",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc --noEmit && node scripts/build.mjs",
+    "dev": "wxt",
+    "build": "wxt build",
+    "package": "node scripts/package.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
   },
+  "dependencies": {
+    "@radix-ui/themes": "^3.2.1",
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
   "devDependencies": {
     "@types/chrome": "^0.0.326",
-    "esbuild": "^0.25.0",
-    "jsdom": "^25.0.0",
-    "typescript": "^5.8.0",
-    "vitest": "^2.1.0"
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "jsdom": "^25.0.1",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5",
+    "vitest": "^2.1.8",
+    "wxt": "^0.19.24"
   }
 }

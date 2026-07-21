@@ -1,0 +1,56 @@
+:root {
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #f8fafc;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 18rem; min-height: 100vh; }
+button, input { font: inherit; }
+
+.sidepanel-shell { min-height: 100vh; background: #f8fafc; }
+.sidepanel-content { min-height: 100vh; padding: 1rem; }
+.subtitle { margin: .35rem 0 0 2rem; line-height: 1.45; }
+.brand-mark { display: grid; place-items: center; width: 2rem; height: 2rem; border-radius: .65rem; color: white; background: linear-gradient(135deg, #2563eb, #60a5fa); box-shadow: 0 .25rem .75rem rgb(37 99 235 / 20%); }
+.summary-card { background: #fff; box-shadow: 0 .2rem .9rem rgb(15 23 42 / 5%); }
+.settings-card { background: #fff; }
+.setting-row { padding-top: .75rem; margin-top: .75rem; border-top: 1px solid var(--gray-4); }
+.batch-input { width: 4.5rem; }
+.progress { margin-top: .8rem; }
+.job-list { min-height: 7rem; max-height: 46vh; padding-right: .35rem; }
+.status-tabs { width: 100%; }
+.status-tabs .rt-SegmentedControlItem { flex: 1; min-width: 0; padding-inline: .35rem; font-size: .75rem; }
+.job-card { background: #fff; transition: border-color .15s ease, box-shadow .15s ease; }
+.job-card:hover { border-color: var(--accent-7); box-shadow: 0 .2rem .6rem rgb(15 23 42 / 5%); }
+.job-copy { min-width: 0; flex: 1; }
+.job-company, .job-position { overflow-wrap: anywhere; word-break: break-word; line-height: 1.35; }
+.job-actions { flex-shrink: 0; }
+.job-meta { margin-top: .35rem; }
+.job-meta > * { flex-shrink: 0; white-space: nowrap; }
+.job-reason { margin-top: .35rem; }
+.empty-state { display: grid; place-items: center; gap: .55rem; min-height: 13rem; padding: 1.5rem; color: var(--gray-10); text-align: center; background: #fff; }
+.error-card { color: var(--red-11); background: var(--red-2); border-color: var(--red-6); }
+.task-message { color: var(--accent-11); background: var(--accent-2); border-color: var(--accent-6); }
+.task-message-running { position: relative; overflow: hidden; box-shadow: 0 .2rem .7rem rgb(37 99 235 / 8%); }
+.task-message-running::after { content: ""; position: absolute; inset: 0 auto 0 -35%; width: 30%; background: linear-gradient(90deg, transparent, rgb(255 255 255 / 45%), transparent); animation: task-sheen 1.8s ease-in-out infinite; pointer-events: none; }
+.task-activity { position: relative; z-index: 1; }
+.activity-icon { display: grid; place-items: center; min-width: 1.5rem; min-height: 1.5rem; color: var(--accent-10); }
+.task-activity-copy { min-width: 0; }
+.task-activity-copy .rt-Text { overflow-wrap: anywhere; }
+.animated-dots { display: inline-flex; align-items: center; gap: .15rem; min-width: 1.2rem; }
+.animated-dots i { width: .25rem; height: .25rem; border-radius: 50%; background: currentColor; opacity: .25; animation: dot-pulse 1.2s ease-in-out infinite; }
+.animated-dots i:nth-child(2) { animation-delay: .18s; }
+.animated-dots i:nth-child(3) { animation-delay: .36s; }
+.completion-card { color: var(--green-11); background: var(--green-2); border-color: var(--green-7); box-shadow: 0 .25rem .8rem rgb(22 163 74 / 10%); }
+.completion-summary { margin-top: .25rem; }
+.action-area { margin-top: auto; padding-top: .25rem; }
+.grow { flex: 1; }
+.spin { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes task-sheen { 0% { transform: translateX(0); } 100% { transform: translateX(500%); } }
+@keyframes dot-pulse { 0%, 100% { opacity: .25; transform: translateY(0); } 50% { opacity: 1; transform: translateY(-.1rem); } }
+
+@media (min-width: 32rem) {
+  .sidepanel-content { padding: 1.25rem; }
+  .job-list { max-height: 52vh; }
+}

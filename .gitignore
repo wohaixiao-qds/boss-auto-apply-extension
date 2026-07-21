@@ -1,4 +1,15 @@
+# Dependencies and generated directories
 node_modules/
+**/node_modules/
+.output/
+.wxt/
+release/
 dist/
-.superpowers/
-.debug/
+
+# Ignore dot-prefixed files and directories, but keep this ignore file itself
+.*
+**/.*
+!.gitignore
+
+# Operating-system files
+.DS_Store
