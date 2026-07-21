@@ -8,7 +8,6 @@ import {
   Heading,
   IconButton,
   Progress,
-  ScrollArea,
   Separator,
   SegmentedControl,
   Switch,
@@ -233,21 +232,21 @@ export default function App() {
 
   return (
     <Box className="sidepanel-shell">
-      <Flex direction="column" gap="4" className="sidepanel-content">
-        <Flex align="start" justify="between" gap="3">
-          <Box>
-            <Flex align="center" gap="2">
+      <Flex direction="column" gap="3" className="sidepanel-content">
+        <Box className="panel-header">
+          <Flex align="center" justify="between" gap="2">
+            <Flex align="center" gap="2" className="panel-title">
               <Box className="brand-mark"><Send size={16} /></Box>
               <Heading size="4">BOSS 自动打招呼</Heading>
             </Flex>
-            <Text as="p" size="2" color="gray" className="subtitle">
-              在侧边栏审核职位，不影响当前页面浏览
-            </Text>
-          </Box>
-          <Badge color={statusColor(task.status)} variant="soft">
-            {statusLabels[task.status]}
-          </Badge>
-        </Flex>
+            <Badge color={statusColor(task.status)} variant="soft">
+              {statusLabels[task.status]}
+            </Badge>
+          </Flex>
+          <Text as="p" size="1" color="gray" className="subtitle">
+            在侧边栏审核职位，不影响当前页面浏览
+          </Text>
+        </Box>
 
         <Card className="summary-card">
           <Flex align="center" justify="between" gap="3">
@@ -264,36 +263,31 @@ export default function App() {
         </Card>
 
         <Card className="settings-card">
-          <Flex align="center" justify="between" gap="3">
-            <Box>
-              <Text as="div" weight="bold" size="2">投递设置</Text>
-              <Text as="div" size="1" color="gray">扫描和开始任务前均会应用</Text>
-            </Box>
-            <Badge color={settingsSaved ? "green" : "gray"} variant="soft">{settingsSaved ? "已保存" : `最多 ${settings.batchLimit} 家`}</Badge>
-          </Flex>
-          <Flex align="center" justify="between" gap="3" className="setting-row">
-            <Box>
-              <Text as="div" size="2">排除外包岗位</Text>
-              <Text as="div" size="1" color="gray">根据职位和接口文本识别外包、派遣、驻场岗位</Text>
-            </Box>
-            <Switch checked={settings.excludeOutsourcing} onCheckedChange={(checked) => void updateSettings({ ...settings, excludeOutsourcing: checked })} />
-          </Flex>
-          <Flex align="center" justify="between" gap="3" className="setting-row">
-            <Box>
-              <Text as="div" size="2">每批最多投递</Text>
-              <Text as="div" size="1" color="gray">每批最多处理该数量</Text>
-            </Box>
-            <TextField.Root
-              type="number"
-              min="1"
-              max="100"
-              value={String(settings.batchLimit)}
-              onChange={(event) => {
-                const value = Math.max(1, Math.min(100, Number(event.target.value) || 1));
-                void updateSettings({ ...settings, batchLimit: value });
-              }}
-              className="batch-input"
-            />
+          <Flex align="center" justify="between" gap="2" className="settings-inline">
+            <Flex align="center" gap="2" className="settings-title">
+              <Text weight="bold" size="2">投递设置</Text>
+              {settingsSaved ? <Badge color="green" variant="soft">已保存</Badge> : null}
+            </Flex>
+            <Flex align="center" gap="3" className="settings-controls">
+              <Flex align="center" gap="2" className="compact-setting">
+                <Text size="1" color="gray">排除外包</Text>
+                <Switch checked={settings.excludeOutsourcing} onCheckedChange={(checked) => void updateSettings({ ...settings, excludeOutsourcing: checked })} />
+              </Flex>
+              <Flex align="center" gap="2" className="compact-setting">
+                <Text size="1" color="gray">投递上限</Text>
+                <TextField.Root
+                  type="number"
+                  min="1"
+                  max="100"
+                  value={String(settings.batchLimit)}
+                  onChange={(event) => {
+                    const value = Math.max(1, Math.min(100, Number(event.target.value) || 1));
+                    void updateSettings({ ...settings, batchLimit: value });
+                  }}
+                  className="batch-input"
+                />
+              </Flex>
+            </Flex>
           </Flex>
         </Card>
 
@@ -341,7 +335,7 @@ export default function App() {
           </Card>
         ) : null}
 
-        <Flex align="center" justify="between" gap="2">
+        <Flex align="center" justify="between" gap="2" className="job-section-header">
           <Box>
             <Text as="div" weight="bold" size="3">待打招呼职位</Text>
             <Text as="div" size="1" color="gray">扫描当前 BOSS 列表后先审核，再开始发送</Text>
@@ -364,23 +358,25 @@ export default function App() {
           <SegmentedControl.Item value="failed">投递失败 {failedCount}</SegmentedControl.Item>
         </SegmentedControl.Root>
 
-        {visibleJobs.length ? (
-          <ScrollArea type="auto" scrollbars="vertical" className="job-list">
-            <Flex direction="column" gap="2">
-              {visibleJobs.map((job) => <JobRow key={job.jobId} job={job} onRemove={(jobId) => void removeJob(jobId)} />)}
-            </Flex>
-          </ScrollArea>
-        ) : (
-          <Card className="empty-state">
-            <ListRestart size={28} strokeWidth={1.5} />
-            <Text as="div" weight="bold" size="3">
-              {listFilter === "pending" ? "待投递列表为空" : listFilter === "success" ? "还没有投递成功的职位" : "还没有投递失败的职位"}
-            </Text>
-            <Text as="div" size="2" color="gray" align="center">
-              {listFilter === "pending" ? "任务完成后这里会自动清空，可切换到其他状态查看结果。" : "职位处理后会在对应状态列表中显示。"}
-            </Text>
-          </Card>
-        )}
+        <Box className="job-list-container">
+          {visibleJobs.length ? (
+            <Box className="job-list">
+              <Flex direction="column" gap="2">
+                {visibleJobs.map((job) => <JobRow key={job.jobId} job={job} onRemove={(jobId) => void removeJob(jobId)} />)}
+              </Flex>
+            </Box>
+          ) : (
+            <Card className="empty-state">
+              <ListRestart size={28} strokeWidth={1.5} />
+              <Text as="div" weight="bold" size="3">
+                {listFilter === "pending" ? "待投递列表为空" : listFilter === "success" ? "还没有投递成功的职位" : "还没有投递失败的职位"}
+              </Text>
+              <Text as="div" size="2" color="gray" align="center">
+                {listFilter === "pending" ? "任务完成后这里会自动清空，可切换到其他状态查看结果。" : "职位处理后会在对应状态列表中显示。"}
+              </Text>
+            </Card>
+          )}
+        </Box>
 
         <Separator size="4" />
 
