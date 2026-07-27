@@ -38,6 +38,13 @@ export interface Settings {
   maxDelayMs: number;
   batchLimit: number;
   excludeOutsourcing: boolean;
+  dailyLimit: number;
+}
+
+export interface DailyStats {
+  // 本地日期，格式 YYYY-MM-DD；与该值不一致时计数清零（次日自动重置）。
+  date: string;
+  sentCount: number;
 }
 
 export interface SendResult {
@@ -66,6 +73,7 @@ export const DEFAULT_SETTINGS: Settings = {
   maxDelayMs: 7500,
   batchLimit: 30,
   excludeOutsourcing: true,
+  dailyLimit: 150,
 };
 
 export function createEmptyTask(): TaskState {

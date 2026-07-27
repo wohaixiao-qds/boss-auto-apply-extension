@@ -1,6 +1,6 @@
 import { browser } from "wxt/browser";
 import { defineBackground } from "wxt/sandbox";
-import { getSettings, getTaskState, saveTaskState } from "../src/shared/storage";
+import { getDailyStats, getSettings, getTaskState, incrementDailySent, saveTaskState } from "../src/shared/storage";
 import { toChineseError } from "../src/shared/errors";
 import {
   createEmptyTask,
@@ -91,10 +91,34 @@ async function processTask() {
     while (true) {
       const task = await getTaskState();
       if (task.status !== "running") break;
+
+      // 每日上限检查：在发送下一条之前，确认今日已投递数未超过用户设置的上限。
+      // BOSS 对每日打招呼有数量限制（约 100/天，随账号浮动），到顶会弹窗并次日才刷新，
+      // 因此用本地计数 + 用户可配置上限提前刹车，避免触发平台风控。
+      const daily = await getDailyStats();
+      if (daily.sentCount >= settings.dailyLimit) {
+        await saveTaskState({
+          ...task,
+          status: "paused" as const,
+          message: `今日已投递 ${daily.sentCount} 家，达到设置的每日上限（${settings.dailyLimit}），已暂停。可明天继续，或在“投递设置”里调高上限。`,
+        });
+        break;
+      }
+
       if (task.currentIndex >= task.queue.length) {
         const completedTask = { ...task, status: "completed" as const, message: `当前批次已投递完成：成功 ${task.successCount} 条，跳过 ${task.skippedCount} 条，失败 ${task.failedCount} 条。` };
         await saveTaskState(completedTask);
-        void notifyBatchCompleted(completedTask);
+        // 必须 await：processTask 是 startTask 里 void 启动的孤儿任务，消息端口早已关闭，
+        // service worker 仅靠循环内的 chrome.* 调用续命。若用 void fire-and-forget，
+        // 这里 break 后 SW 会被判定空闲而回收，notifyBatchCompleted 内部的
+        // chrome.notifications.create 可能根本没机会执行 → 任务完成却不弹通知。
+        console.log("[boss-greeting] 进入完成分支，准备发送完成通知", {
+          success: completedTask.successCount,
+          skipped: completedTask.skippedCount,
+          failed: completedTask.failedCount,
+        });
+        const notifyResult = await notifyBatchCompleted(completedTask);
+        console.log("[boss-greeting] 完成通知结果", notifyResult);
         break;
       }
 
@@ -123,6 +147,10 @@ async function processTask() {
       const latest = await getTaskState();
       const nextStatus = result.status === "paused" ? "paused" : "running";
       const nextJobStatus = result.status === "sent" ? "sent" : result.status === "skipped" ? "skipped" : "failed";
+      if (result.status === "sent") {
+        // 仅在真正发送成功时累计今日投递企业数；跳过/失败不计入。
+        await incrementDailySent();
+      }
       await saveTaskState({
         ...latest,
         status: nextStatus,
@@ -132,7 +160,9 @@ async function processTask() {
         skippedCount: latest.skippedCount + (result.status === "skipped" ? 1 : 0),
         failedCount: latest.failedCount + (result.status === "failed" ? 1 : 0),
         message: result.reason || (result.status === "sent"
-          ? `已完成：${job.companyName}，正在准备下一条。`
+          ? (index + 1 >= latest.queue.length
+            ? `已完成：${job.companyName}，本批次最后一条已发送。`
+            : `已完成：${job.companyName}，正在准备下一条。`)
           : result.status === "skipped" ? `已跳过：${job.companyName}。` : `处理失败：${job.companyName}。`),
       });
       if (result.status === "paused") break;

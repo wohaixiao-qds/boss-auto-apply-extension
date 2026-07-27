@@ -18,6 +18,7 @@ import {
 import {
   Check,
   CircleAlert,
+  Info,
   ListRestart,
   LoaderCircle,
   Pause,
@@ -30,9 +31,9 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { browser } from "wxt/browser";
-import { getSettings, getTaskState, saveSettings } from "../../src/shared/storage";
+import { DAILY_STATS_KEY, getDailyStats, getSettings, getTaskState, saveSettings } from "../../src/shared/storage";
 import { toChineseError } from "../../src/shared/errors";
-import { createEmptyTask, getProgress, type JobItem, type RuntimeMessage, type ScanResponse, type TaskState, type TaskStatus } from "../../src/shared/types";
+import { createEmptyTask, getProgress, type DailyStats, type JobItem, type RuntimeMessage, type ScanResponse, type TaskState, type TaskStatus } from "../../src/shared/types";
 import type { Settings } from "../../src/shared/types";
 import { isOutsourcingJob } from "../../src/shared/job-filter";
 
@@ -100,14 +101,48 @@ function JobRow({ job, onRemove }: { job: JobItem; onRemove: (id: string) => voi
   );
 }
 
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+// 扩展刚重新加载后，原页面的内容脚本会被卸载，sendMessage 会抛这类底层错误。
+function isConnectionLost(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /receiving end does not exist|could not establish connection|message port closed|disconnected/i.test(message);
+}
+
+async function waitForTabComplete(tabId: number, timeoutMs = 15000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const tab = await browser.tabs.get(tabId);
+      if (tab.status === "complete") return;
+    } catch {
+      return;
+    }
+    await delay(300);
+  }
+}
+
+// 内容脚本在线但没抓到职位时，把原因翻译成可操作的提示。
+function analyzeEmptyScan(warning: string | undefined, scriptReachable: boolean): string {
+  if (warning) return warning;
+  if (!scriptReachable) {
+    return "无法连接 BOSS 页面，请确认已打开 BOSS 直聘职位列表并重试。";
+  }
+  return "未识别到职位。请确认当前是 BOSS 职位列表页、已完成城市/关键词/薪资等筛选，并等待列表加载完成后再扫描。";
+}
+
 export default function App() {
   const [task, setTask] = useState<TaskState>(createEmptyTask);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [completionDismissed, setCompletionDismissed] = useState(false);
   const [listFilter, setListFilter] = useState<ListFilter>("pending");
-  const [settings, setSettings] = useState<Settings>({ minDelayMs: 3500, maxDelayMs: 7500, batchLimit: 30, excludeOutsourcing: true });
+  const [settings, setSettings] = useState<Settings>({ minDelayMs: 3500, maxDelayMs: 7500, batchLimit: 30, excludeOutsourcing: true, dailyLimit: 150 });
+  const [daily, setDaily] = useState<DailyStats>({ date: "", sentCount: 0 });
   const [settingsSaved, setSettingsSaved] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -119,8 +154,10 @@ export default function App() {
   useEffect(() => {
     void refresh();
     void getSettings().then(setSettings);
+    void getDailyStats().then(setDaily);
     const listener = (changes: Record<string, chrome.storage.StorageChange>) => {
       if (changes["boss-greeting-task"]) void refresh();
+      if (changes[DAILY_STATS_KEY]) void getDailyStats().then(setDaily);
     };
     browser.storage.onChanged.addListener(listener);
     return () => browser.storage.onChanged.removeListener(listener);
@@ -140,16 +177,48 @@ export default function App() {
   const scanJobs = useCallback(async () => {
     setBusy(true);
     setError("");
+    setNotice("");
     try {
       const tabs = await browser.tabs.query({ active: true, currentWindow: true });
       const tab = tabs[0];
       if (!tab?.id || !tab.url?.includes("zhipin.com")) {
-        throw new Error("请先打开 BOSS 直聘职位列表页。");
+        throw new Error("请先打开 BOSS 直聘职位列表页（zhipin.com）。");
       }
-      const response = (await browser.tabs.sendMessage(tab.id, { type: "SCAN_JOBS" } satisfies RuntimeMessage)) as ScanResponse;
+
+      let response: ScanResponse | undefined;
+      try {
+        response = (await browser.tabs.sendMessage(tab.id, { type: "SCAN_JOBS" } satisfies RuntimeMessage)) as ScanResponse;
+      } catch (error) {
+        if (!isConnectionLost(error)) throw error;
+        // 内容脚本未连接（常见于扩展刚重新加载后页面脚本被卸载）。
+        // 刷新 BOSS 页面以重建 fetch/XHR 信息桥，让扩展重新捕获职位列表接口响应。
+        setNotice("BOSS 页面连接已断开，正在刷新页面重建连接…");
+        await browser.tabs.reload(tab.id);
+        await waitForTabComplete(tab.id);
+        // 页面加载完成后，再留出时间让 BOSS 重新请求职位列表接口并被桥捕获。
+        await delay(2500);
+        try {
+          response = (await browser.tabs.sendMessage(tab.id, { type: "SCAN_JOBS" } satisfies RuntimeMessage)) as ScanResponse;
+        } catch {
+          throw new Error("无法连接 BOSS 页面，已尝试刷新重建连接仍未成功，请手动刷新页面后重试。");
+        }
+      }
+
       if (!response?.jobs?.length) {
-        throw new Error(response?.warning || "当前页面没有识别到职位，请确认已完成筛选。");
+        // 内容脚本在线但没抓到职位：可能是 BOSS 列表接口尚未返回，等待后重试一次。
+        setNotice("正在等待 BOSS 职位列表加载…");
+        await delay(2000);
+        try {
+          response = (await browser.tabs.sendMessage(tab.id, { type: "SCAN_JOBS" } satisfies RuntimeMessage)) as ScanResponse;
+        } catch {
+          /* 保留上一次的空响应，交给下面统一分析报错 */
+        }
       }
+
+      if (!response?.jobs?.length) {
+        throw new Error(analyzeEmptyScan(response?.warning, Boolean(response)));
+      }
+
       const scannedJobs = response.jobs;
       const jobs = settings.excludeOutsourcing ? scannedJobs.filter((job) => !isOutsourcingJob(job)) : scannedJobs;
       if (!jobs.length) throw new Error("筛选后没有符合条件的职位，请关闭“排除外包岗位”或调整 BOSS 筛选条件。");
@@ -171,8 +240,9 @@ export default function App() {
       setError(toChineseError(cause, "扫描失败，请确认 BOSS 页面已加载完成并重新尝试。"));
     } finally {
       setBusy(false);
+      setNotice("");
     }
-  }, [refresh]);
+  }, [refresh, settings.excludeOutsourcing]);
 
   const removeJob = async (jobId: string) => {
     const { [jobId]: _removed, ...remainingJobs } = task.jobs;
@@ -257,6 +327,7 @@ export default function App() {
             <Flex direction="column" align="end" gap="1">
               <Text size="2" color="green">成功 {task.successCount}</Text>
               <Text size="2" color="red">失败 {task.failedCount}</Text>
+              <Text size="1" color="gray">今日投递 {daily.sentCount} / {settings.dailyLimit}</Text>
             </Flex>
           </Flex>
           <Progress value={progress} className="progress" />
@@ -287,6 +358,20 @@ export default function App() {
                   className="batch-input"
                 />
               </Flex>
+              <Flex align="center" gap="2" className="compact-setting">
+                <Text size="1" color="gray">每日上限</Text>
+                <TextField.Root
+                  type="number"
+                  min="1"
+                  max="200"
+                  value={String(settings.dailyLimit)}
+                  onChange={(event) => {
+                    const value = Math.max(1, Math.min(200, Number(event.target.value) || 1));
+                    void updateSettings({ ...settings, dailyLimit: value });
+                  }}
+                  className="batch-input"
+                />
+              </Flex>
             </Flex>
           </Flex>
         </Card>
@@ -296,6 +381,15 @@ export default function App() {
             <Flex align="start" gap="2">
               <CircleAlert size={17} aria-hidden="true" />
               <Text size="2">{error}</Text>
+            </Flex>
+          </Card>
+        ) : null}
+
+        {notice ? (
+          <Card className="notice-card">
+            <Flex align="start" gap="2">
+              <Info size={17} aria-hidden="true" />
+              <Text size="2">{notice}</Text>
             </Flex>
           </Card>
         ) : null}

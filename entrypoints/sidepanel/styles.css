@@ -51,6 +51,7 @@ button:disabled, [role="button"][aria-disabled="true"], [data-disabled] { cursor
 .job-reason { margin-top: .35rem; }
 .empty-state { display: grid; flex: 1; place-items: center; gap: .55rem; min-height: 0; padding: 1rem; color: var(--gray-10); text-align: center; background: #fff; }
 .error-card { color: var(--red-11); background: var(--red-2); border-color: var(--red-6); }
+.notice-card { color: var(--gray-11); background: var(--gray-2); border-color: var(--gray-6); }
 .task-message { color: var(--accent-11); background: var(--accent-2); border-color: var(--accent-6); }
 .task-message-running { position: relative; overflow: hidden; box-shadow: 0 .2rem .7rem rgb(37 99 235 / 8%); }
 .task-message-running::after { content: ""; position: absolute; inset: 0 auto 0 -35%; width: 30%; background: linear-gradient(90deg, transparent, rgb(255 255 255 / 45%), transparent); animation: task-sheen 1.8s ease-in-out infinite; pointer-events: none; }
