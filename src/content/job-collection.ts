@@ -1,4 +1,5 @@
 import type { JobItem } from "../shared/types";
+import { extractJobIdFromUrl, normalizeBossJobUrl } from "../shared/job-target";
 
 export function mergeVisibleJobs(
   target: Map<string, JobItem>,
@@ -11,18 +12,23 @@ export function mergeVisibleJobs(
     const current = target.get(visibleJob.jobId);
     target.set(visibleJob.jobId, current ? mergeCollectedJob(current, enriched) : enriched);
   }
+
+  // API 响应可能晚于列表滚动；只回填已经被 DOM 发现的职位，绝不加入 API 独有职位。
+  for (const [jobId, collectedJob] of target) {
+    const apiJob = apiJobs.get(jobId);
+    if (apiJob) target.set(jobId, enrichVisibleJob(collectedJob, apiJob));
+  }
 }
 
 export function enrichVisibleJob(visibleJob: JobItem, apiJob?: JobItem): JobItem {
-  if (!apiJob) return visibleJob;
+  if (!apiJob || apiJob.jobId !== visibleJob.jobId) return visibleJob;
   return {
-    ...apiJob,
     ...visibleJob,
-    companyName: recognizedValue(visibleJob.companyName, apiJob.companyName, "未识别公司"),
-    positionName: recognizedValue(visibleJob.positionName, apiJob.positionName, "未识别职位"),
-    salary: visibleJob.salary || apiJob.salary,
-    city: visibleJob.city || apiJob.city,
-    url: absoluteUrl(visibleJob.url, apiJob.url),
+    companyName: recognizedValue(apiJob.companyName, visibleJob.companyName, "未识别公司"),
+    positionName: recognizedValue(apiJob.positionName, visibleJob.positionName, "未识别职位"),
+    salary: apiJob.salary || visibleJob.salary,
+    city: apiJob.city || visibleJob.city,
+    url: preferredJobUrl(visibleJob.url, apiJob.url, visibleJob.jobId),
     sourceText: combineSourceText(apiJob.sourceText, visibleJob.sourceText),
     status: visibleJob.status,
   };
@@ -36,7 +42,7 @@ function mergeCollectedJob(current: JobItem, next: JobItem): JobItem {
     positionName: recognizedValue(next.positionName, current.positionName, "未识别职位"),
     salary: next.salary || current.salary,
     city: next.city || current.city,
-    url: absoluteUrl(next.url, current.url),
+    url: preferredJobUrl(next.url, current.url, next.jobId),
     sourceText: combineSourceText(current.sourceText, next.sourceText),
     status: current.status === "sent" || next.status === "sent" ? "sent" : "pending",
   };
@@ -47,9 +53,12 @@ function recognizedValue(primary: string, fallback: string, placeholder: string)
   return fallback || primary;
 }
 
-function absoluteUrl(primary: string, fallback: string): string {
-  if (/^https?:\/\//i.test(primary)) return primary;
-  return fallback || primary;
+function preferredJobUrl(primary: string, fallback: string, jobId: string): string {
+  const primaryUrl = normalizeBossJobUrl(primary);
+  if (primaryUrl && extractJobIdFromUrl(primaryUrl) === jobId) return primaryUrl;
+  const fallbackUrl = normalizeBossJobUrl(fallback);
+  if (fallbackUrl && extractJobIdFromUrl(fallbackUrl) === jobId) return fallbackUrl;
+  return primaryUrl || fallbackUrl || primary || fallback;
 }
 
 function combineSourceText(left?: string, right?: string): string {

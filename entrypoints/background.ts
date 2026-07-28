@@ -2,6 +2,7 @@ import { browser } from "wxt/browser";
 import { defineBackground } from "wxt/sandbox";
 import { getDailyStats, getSettings, getTaskState, incrementDailySent, saveTaskState } from "../src/shared/storage";
 import { toChineseError } from "../src/shared/errors";
+import { prepareTaskJobs } from "../src/shared/job-queue";
 import {
   createEmptyTask,
   getSendDisposition,
@@ -58,8 +59,9 @@ async function handleMessage(message: RuntimeMessage) {
 async function startTask(jobs: JobItem[]) {
   if (jobs.length === 0) throw new Error("没有可发送的职位。");
   const settings = await getSettings();
-  const uniqueJobs = [...new Map(jobs.filter((job) => job.jobId).map((job) => [job.jobId, job])).values()];
-  const limitedJobs = uniqueJobs.slice(0, settings.batchLimit).map((job) => ({ ...job, status: "pending" as const, reason: undefined }));
+  const prepared = prepareTaskJobs(jobs, settings.batchLimit);
+  const limitedJobs = prepared.jobs;
+  if (limitedJobs.length === 0) throw new Error("当前任务没有可验证的职位详情链接，请重新扫描职位。");
   const jobMap = Object.fromEntries(limitedJobs.map((job) => [job.jobId, job]));
   const task: TaskState = {
     ...createEmptyTask(),
@@ -68,7 +70,9 @@ async function startTask(jobs: JobItem[]) {
     status: "running",
     startedAt: Date.now(),
     updatedAt: Date.now(),
-    message: limitedJobs.length < uniqueJobs.length ? `本批最多发送 ${settings.batchLimit} 条。` : undefined,
+    message: prepared.removedCount > 0
+      ? `已排除 ${prepared.removedCount} 条岗位或职位链接无效的旧数据。`
+      : prepared.limitedCount > 0 ? `本批最多发送 ${settings.batchLimit} 条。` : undefined,
   };
   await saveTaskState(task);
   void processTask();
@@ -140,7 +144,7 @@ async function processTask() {
       let result: SendResult;
       try {
         await saveTaskState({ ...sendingTask, message: `正在发送打招呼：${job.companyName} · ${job.positionName}` });
-        result = await sendJobInDetailTab(job);
+        result = await sendJobWithFallback(job);
       } catch (error) {
         result = { status: "failed", reason: toChineseError(error, "无法处理职位详情页，已记录失败并继续下一条。") };
       }
@@ -218,11 +222,52 @@ async function createSystemNotification(title: string, message: string, logLabel
   }
 }
 
+async function sendJobWithFallback(job: JobItem): Promise<SendResult> {
+  const listResult = await trySendInActiveList(job);
+  if (listResult && !shouldFallbackToDetail(listResult)) return listResult;
+  return sendJobInDetailTab(job);
+}
+
+async function trySendInActiveList(job: JobItem): Promise<SendResult | undefined> {
+  const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id || !tab.url || !isBossJobListUrl(tab.url)) return undefined;
+  try {
+    return await browser.tabs.sendMessage(tab.id, { type: "SEND_JOB", job, context: "list" } satisfies RuntimeMessage) as SendResult;
+  } catch {
+    return undefined;
+  }
+}
+
+function isBossJobListUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return /^(?:www\.)?zhipin\.com$/i.test(url.hostname) && /\/web\/geek\/jobs(?:\/|$)/i.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function shouldFallbackToDetail(result: SendResult): boolean {
+  return result.status === "failed" && /当前列表找不到|未找到与职位.*立即沟通.*按钮/.test(result.reason || "");
+}
+
 async function sendJobInDetailTab(job: JobItem): Promise<SendResult> {
+  let lastResult: SendResult = { status: "failed", reason: `职位 ${job.jobId} 的详情页加载失败。` };
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    lastResult = await sendJobInNewDetailTab(job);
+    if (!isRetryableDetailFailure(lastResult) || attempt === 1) return lastResult;
+    await wait(1000);
+  }
+  return lastResult;
+}
+
+async function sendJobInNewDetailTab(job: JobItem): Promise<SendResult> {
   const tab = await browser.tabs.create({ url: job.url, active: false });
   if (!tab.id) throw new Error(`无法为职位 ${job.jobId} 创建后台详情标签页。`);
 
   try {
+    const ready = await waitForTabReady(tab.id);
+    if (!ready) return { status: "failed", reason: `职位 ${job.jobId} 的详情页加载超时。` };
     return await sendWhenContentReady(tab.id, job);
   } finally {
     try {
@@ -231,6 +276,26 @@ async function sendJobInDetailTab(job: JobItem): Promise<SendResult> {
       // 标签页可能已被页面或用户关闭。
     }
   }
+}
+
+function isRetryableDetailFailure(result: SendResult): boolean {
+  return result.status === "failed" && /详情页加载超时|详情页未找到.*立即沟通.*按钮|内容脚本连接超时/.test(result.reason || "");
+}
+
+async function waitForTabReady(tabId: number): Promise<boolean> {
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    try {
+      const tab = await browser.tabs.get(tabId);
+      if (tab.status === "complete") {
+        await wait(500);
+        return true;
+      }
+    } catch {
+      return false;
+    }
+    await wait(250);
+  }
+  return false;
 }
 
 async function sendWhenContentReady(tabId: number, job: JobItem): Promise<SendResult> {
@@ -245,7 +310,7 @@ async function sendWhenContentReady(tabId: number, job: JobItem): Promise<SendRe
       await wait(250);
     }
   }
-  return { status: "failed", reason: `职位 ${job.jobId} 的详情页加载超时，已记录失败并继续下一条。` };
+  return { status: "failed", reason: `职位 ${job.jobId} 的内容脚本连接超时，已记录失败并继续下一条。` };
 }
 
 async function updateStatus(status: TaskState["status"], message: string) {

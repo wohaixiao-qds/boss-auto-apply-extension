@@ -4,11 +4,13 @@ import { extractId, findJobCards, findJobListRoot, getJobId, isBossJobMarkedSent
 import { isJobListApiUrl, parseApiJobs } from "../src/content/api-parser";
 import { detectBlockingReason } from "../src/content/blocking-page";
 import { mergeVisibleJobs } from "../src/content/job-collection";
+import { findGreetingAction, isAlreadySentControl, isCommunicationSuccessText } from "../src/content/greeting-action";
 import { filterJobs, type JobFilterOptions } from "../src/shared/job-filter";
 import { MAX_BATCH_LIMIT, type JobItem, type RuntimeMessage, type SendResult } from "../src/shared/types";
 
 const apiJobs = new Map<string, JobItem>();
 let apiSearchKey = "";
+const PENDING_COMMUNICATION_KEY = "boss-auto-pending-communication-job";
 
 export default defineContentScript({
   matches: ["https://www.zhipin.com/*", "https://zhipin.com/*"],
@@ -128,6 +130,7 @@ async function sendGreeting(job: JobItem, context: "list" | "detail-tab"): Promi
 }
 
 async function sendGreetingInDetailTab(job: JobItem): Promise<SendResult> {
+  if (isPendingCommunicationComplete(job)) return { status: "sent" };
   const currentJobId = extractId(location.href);
   if (currentJobId && currentJobId !== job.jobId) {
     return { status: "failed", reason: `详情页职位 ID ${currentJobId} 与目标 ${job.jobId} 不一致，已跳过该职位。` };
@@ -137,24 +140,26 @@ async function sendGreetingInDetailTab(job: JobItem): Promise<SendResult> {
 
   const action = await waitForGreetingAction(job);
   if (!action) return { status: "failed", reason: `详情页未找到与职位 ${job.jobId} 关联的“立即沟通”按钮，已跳过该职位。` };
-  if (isAlreadySent(action)) return { status: "skipped", reason: "BOSS 已标记该职位为已沟通。" };
+  if (isAlreadySentControl(action)) return { status: "skipped", reason: "BOSS 已标记该职位为已沟通。" };
 
   const feedbackTracker = createFeedbackTracker();
-  safeClick(action);
+  sessionStorage.setItem(PENDING_COMMUNICATION_KEY, job.jobId);
+  safeClick(action, false);
   await delay(450);
 
   const confirmation = findConfirmationAction();
   if (confirmation && confirmation !== action) {
-    safeClick(confirmation);
+    safeClick(confirmation, false);
   }
 
-  const result = await waitForSendOutcome(action, feedbackTracker);
+  const result = await waitForSendOutcome(action, feedbackTracker, job);
+  if (result.status !== "sent") clearPendingCommunication(job);
   if (result.status === "sent") closeSuccessDialog();
   return result;
 }
 
 async function waitForGreetingAction(job: JobItem): Promise<HTMLElement | null> {
-  for (let attempt = 0; attempt < 24; attempt += 1) {
+  for (let attempt = 0; attempt < 60; attempt += 1) {
     const action = findGreetingAction(document.body, job);
     if (action) return action;
     await delay(250);
@@ -176,7 +181,7 @@ async function sendGreetingFromList(job: JobItem): Promise<SendResult> {
 
   const action = findGreetingAction(card, job) || findGreetingAction(document.body, job);
   if (!action) return { status: "failed", reason: `未找到与职位 ${job.jobId} 关联的“立即沟通”按钮，已跳过该职位。` };
-  if (isAlreadySent(action)) return { status: "skipped", reason: "该职位可能已经打过招呼。" };
+  if (isAlreadySentControl(action)) return { status: "skipped", reason: "该职位可能已经打过招呼。" };
 
   const feedbackTracker = createFeedbackTracker();
   safeClick(action);
@@ -197,51 +202,12 @@ async function sendGreetingFromList(job: JobItem): Promise<SendResult> {
     }
   }
 
-  const result = await waitForSendOutcome(action, feedbackTracker);
+  const result = await waitForSendOutcome(action, feedbackTracker, job);
   if (result.status === "sent") {
     closeSuccessDialog();
     await waitForBossListStatus(card);
   }
   return result;
-}
-
-function findGreetingAction(root: Element, job: JobItem): HTMLElement | null {
-  const elements = [...root.querySelectorAll<HTMLElement>("button, a, [role=button], [class*='btn'], [class*='op-btn-chat'], [ka^='cpc_job_list_chat_']")]
-    .filter(isUsableGreetingControl);
-  const ranked = elements.map((element) => {
-    const label = normalize(element.textContent ?? "");
-    const ka = element.getAttribute("ka") || "";
-    let score = 0;
-    if (/立即沟通/.test(label)) score += 100;
-    if (/打招呼/.test(label)) score += 90;
-    if (/沟通/.test(label)) score += 20;
-    if (element.matches(".op-btn-chat, [class*='op-btn-chat']")) score += 60;
-    if (ka.startsWith("cpc_job_list_chat_")) score += 70;
-    if (element.tagName === "BUTTON") score += 40;
-    if (element.tagName === "A") score += 25;
-    if (element.getAttribute("role") === "button") score += 35;
-    if (job.jobId && (ka.includes(job.jobId) || getJobId(element.closest<HTMLElement>(".job-card-wrap, .job-card-box, .job-card-wrapper, .job-primary, li, article, .job-card") || element, "") === job.jobId)) score += 100;
-    if (element.closest(".job-detail-op, .job-detail-header, .job-detail-box, .job-detail-container, [class*='job-detail']")) score += 25;
-    const isDedicatedJobPage = extractId(location.href) === job.jobId;
-    if (root === document.body && !hasJobAssociation(element, job.jobId) && !isDedicatedJobPage) score -= 1000;
-    if (isAlreadySent(element)) score -= 200;
-    return { element, score };
-  });
-  return ranked.sort((a, b) => b.score - a.score).find((item) => item.score >= 50)?.element ?? null;
-}
-
-function isUsableGreetingControl(element: HTMLElement): boolean {
-  const hasDescendantControl = Boolean(element.querySelector("button, a, [role=button], .op-btn-chat, [class*='op-btn-chat'], [ka^='cpc_job_list_chat_']"));
-  if (hasDescendantControl && element.tagName !== "BUTTON" && element.tagName !== "A" && element.getAttribute("role") !== "button") return false;
-
-  const isInteractive = element.tagName === "BUTTON"
-    || element.tagName === "A"
-    || element.getAttribute("role") === "button"
-    || element.matches(".op-btn-chat, [class*='op-btn-chat'], [ka^='cpc_job_list_chat_']");
-  if (isInteractive) return true;
-
-  // 避免选择包裹真实按钮的 span/div；点击外层通常不会触发 BOSS 的沟通逻辑。
-  return !hasDescendantControl;
 }
 
 function findConfirmationAction(): HTMLElement | null {
@@ -252,7 +218,7 @@ function findConfirmationAction(): HTMLElement | null {
 
 function closeSuccessDialog(): void {
   const dialogs = [...document.querySelectorAll<HTMLElement>("[role='dialog'], [class*='dialog'], [class*='modal'], [class*='layer'], [class*='popup']")];
-  const successDialog = dialogs.find((dialog) => successPattern.test(normalize(dialog.innerText || dialog.textContent || "")));
+  const successDialog = dialogs.find((dialog) => isCommunicationSuccessText(dialog.innerText || dialog.textContent || ""));
   if (!successDialog) return;
 
   const closeButton = [...successDialog.querySelectorAll<HTMLElement>("button, a, [role='button'], [class*='btn'], [class*='close']")]
@@ -298,45 +264,23 @@ function isCardSelected(card: HTMLElement): boolean {
   ));
 }
 
-function hasJobAssociation(element: HTMLElement, jobId: string): boolean {
-  if (!jobId) return false;
-  let current: Element | null = element;
-  for (let depth = 0; current && depth < 8; depth += 1) {
-    const directValues = [
-      current.getAttribute("data-jobid"),
-      current.getAttribute("data-job-id"),
-      current.getAttribute("data-lid"),
-      current.getAttribute("data-id"),
-      current.getAttribute("ka"),
-    ].filter(Boolean).join(" ");
-    if (directValues.includes(jobId)) return true;
-
-    const link = current.matches("a[href]")
-      ? current as HTMLAnchorElement
-      : current.querySelector<HTMLAnchorElement>('a[href*="/job_detail/"], a[href*="/job/"]');
-    if (link && extractId(link.href) === jobId) return true;
-    current = current.parentElement;
-  }
-  return false;
-}
-
 /**
  * Keep BOSS's own click handlers, but prevent automatic navigation from list cards,
  * chat links, and modal controls. The old implementation only blocked javascript:
  * URLs, so a normal chat href could still take the task out of the job list.
  */
-function safeClick(element: HTMLElement): void {
+function safeClick(element: HTMLElement, preventAnchorNavigation = true): void {
   const preventNavigation = (event: MouseEvent) => {
     const target = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>("a[href]") : null;
     if (target) event.preventDefault();
   };
-  document.addEventListener("click", preventNavigation, true);
+  if (preventAnchorNavigation) document.addEventListener("click", preventNavigation, true);
   try {
     // HTMLElement.click() 会触发 BOSS 组件实际使用的原生激活逻辑；
     // 手工 dispatchEvent 在部分 Vue/React 控件上只触发了事件监听，却没有执行控件动作。
     element.click();
   } finally {
-    document.removeEventListener("click", preventNavigation, true);
+    if (preventAnchorNavigation) document.removeEventListener("click", preventNavigation, true);
   }
 }
 
@@ -377,7 +321,7 @@ function createFeedbackTracker(): FeedbackTracker {
   const observer = new MutationObserver((mutations) => {
     for (const mutation of mutations) {
       const touchedNodes = [mutation.target, ...Array.from(mutation.addedNodes)];
-      if (touchedNodes.some((node) => successPattern.test(normalize(nodeText(node))))) {
+      if (touchedNodes.some((node) => isCommunicationSuccessText(nodeText(node)))) {
         successMutationDetected = true;
         break;
       }
@@ -387,12 +331,14 @@ function createFeedbackTracker(): FeedbackTracker {
   return { before, observer, successMutationDetected: () => successMutationDetected };
 }
 
-async function waitForSendOutcome(action: HTMLElement, tracker: FeedbackTracker): Promise<SendResult> {
+async function waitForSendOutcome(action: HTMLElement, tracker: FeedbackTracker, job: JobItem): Promise<SendResult> {
   try {
-    for (let attempt = 0; attempt < 20; attempt += 1) {
+    for (let attempt = 0; attempt < 60; attempt += 1) {
       const blocked = detectBlockingPage();
       if (blocked) return { status: "paused", reason: blocked };
-      if (isAlreadySent(action)) return { status: "sent" };
+      if (isPendingCommunicationComplete(job)) return { status: "sent" };
+      const currentAction = findGreetingAction(document.body, job);
+      if ((currentAction && isAlreadySentControl(currentAction)) || isAlreadySentControl(action)) return { status: "sent" };
       if (hasNewSuccessFeedback(tracker) || (tracker.successMutationDetected() && getSuccessFeedbackNodes().length > 0)) {
         return { status: "sent" };
       }
@@ -404,11 +350,9 @@ async function waitForSendOutcome(action: HTMLElement, tracker: FeedbackTracker)
   }
 }
 
-const successPattern = /已向\s*BOSS\s*发送消息|已发送消息|发送成功|消息已发出|沟通成功/;
-
 function getSuccessFeedbackNodes(): HTMLElement[] {
   const selectors = "[role='alert'], .toast, [class*='toast'], [class*='notify'], [class*='message'], [class*='dialog'], [class*='modal'], [class*='success']";
-  return [...document.querySelectorAll<HTMLElement>(selectors)].filter((node) => successPattern.test(feedbackText(node)));
+  return [...document.querySelectorAll<HTMLElement>(selectors)].filter((node) => isCommunicationSuccessText(feedbackText(node)));
 }
 
 function feedbackText(node: HTMLElement): string {
@@ -423,8 +367,19 @@ function hasNewSuccessFeedback(tracker: FeedbackTracker): boolean {
   return getSuccessFeedbackNodes().some((node) => tracker.before.get(node) !== feedbackText(node));
 }
 
-function isAlreadySent(element: HTMLElement): boolean {
-  return /已沟通|已发送|已打招呼|继续沟通/.test(normalize(element.textContent ?? ""));
+function isPendingCommunicationComplete(job: JobItem): boolean {
+  if (sessionStorage.getItem(PENDING_COMMUNICATION_KEY) !== job.jobId) return false;
+  const isChatRoute = /\/web\/geek\/(?:chat|im)(?:\/|$)/i.test(location.pathname);
+  const hasChatSurface = Boolean(document.querySelector("[contenteditable='true'], textarea, [class*='chat-input'], [class*='message-input']"));
+  if (!isChatRoute && !hasChatSurface) return false;
+  clearPendingCommunication(job);
+  return true;
+}
+
+function clearPendingCommunication(job: JobItem): void {
+  if (sessionStorage.getItem(PENDING_COMMUNICATION_KEY) === job.jobId) {
+    sessionStorage.removeItem(PENDING_COMMUNICATION_KEY);
+  }
 }
 
 function delay(milliseconds: number) {

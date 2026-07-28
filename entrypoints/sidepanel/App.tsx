@@ -66,12 +66,14 @@ function JobRow({ job, onRemove }: { job: JobItem; onRemove: (id: string) => voi
     <Card className="job-card" size="1">
       <Flex align="start" justify="between" gap="3">
         <Box className="job-copy">
-          <Text as="div" weight="bold" size="2" className="job-company">
-            {job.companyName || "未识别公司"}
-          </Text>
-          <Text as="div" color="gray" size="2" className="job-position">
-            {job.positionName || "未识别职位"}
-          </Text>
+          <Flex align="start" gap="2" className="job-field">
+            <Text size="1" color="gray" className="job-field-label">公司</Text>
+            <Text weight="bold" size="2" className="job-company">{job.companyName || "未识别公司"}</Text>
+          </Flex>
+          <Flex align="start" gap="2" className="job-field">
+            <Text size="1" color="gray" className="job-field-label">岗位</Text>
+            <Text color="gray" size="2" className="job-position">{job.positionName}</Text>
+          </Flex>
           <Flex align="center" gap="2" className="job-meta">
             <Text color={job.salary ? "orange" : "gray"} size="1" weight={job.salary ? "medium" : "regular"}>
               {job.salary || "薪资未识别"}
@@ -282,6 +284,8 @@ export default function App() {
       const jobs = filtered.jobs.slice(0, settings.batchLimit);
       if (!jobs.length) throw new Error("筛选后没有符合条件的职位，请调整外包/猎头过滤设置或 BOSS 搜索条件。");
       const exclusionParts = [
+        filtered.excluded.unrecognizedPosition ? `岗位未识别 ${filtered.excluded.unrecognizedPosition} 个` : "",
+        filtered.excluded.invalidTarget ? `职位链接无效 ${filtered.excluded.invalidTarget} 个` : "",
         filtered.excluded.outsourcing ? `外包 ${filtered.excluded.outsourcing} 个` : "",
         filtered.excluded.headhunter ? `猎头 ${filtered.excluded.headhunter} 个` : "",
         filtered.excluded.contacted ? `已沟通 ${filtered.excluded.contacted} 个` : "",

@@ -1,4 +1,5 @@
 import type { JobItem, ScanResponse } from "../shared/types";
+import { extractJobIdFromUrl } from "../shared/job-target";
 
 export function scanJobs(): ScanResponse {
   const cards = findJobCards();
@@ -6,17 +7,20 @@ export function scanJobs(): ScanResponse {
   const jobs: JobItem[] = [];
 
   for (const card of cards) {
-    const link = card.querySelector<HTMLAnchorElement>('a[href*="/job_detail/"], a[href*="/job/"]') ?? card.querySelector<HTMLAnchorElement>("a[href]");
+    const link = card.matches('a[href*="/job_detail/"], a[href*="/job/"]')
+      ? card as HTMLAnchorElement
+      : card.querySelector<HTMLAnchorElement>('a[href*="/job_detail/"], a[href*="/job/"]');
     const url = link?.href ?? "";
     const jobId = getJobId(card, url);
     if (!jobId || seen.has(jobId)) continue;
     const text = normalize(card.textContent ?? "");
-    const positionName = pickText(card, [".job-name", ".job-title", "h3", "h2", '[class*="job-name"]', '[class*="job-title"]']) || link?.textContent?.trim() || "";
-    if (!isRealJobTitle(positionName) || isMoreInfoEntry(card, positionName)) continue;
+    const companyName = findCompanyName(card);
+    const positionName = findPositionName(card, link, companyName);
+    if (isMoreInfoEntry(card, positionName)) continue;
     seen.add(jobId);
     jobs.push({
       jobId,
-      companyName: findCompanyName(card) || "未识别公司",
+      companyName: companyName || "未识别公司",
       positionName,
       salary: findSalary(card),
       city: pickText(card, [".job-area", ".job-location", ".location", '[class*="location"]', '[class*="city"]']) || "",
@@ -27,6 +31,38 @@ export function scanJobs(): ScanResponse {
   }
 
   return { jobs, warning: jobs.length ? undefined : "未读取到带职位 ID 的职位卡片，请确认当前页面是 BOSS 职位列表。" };
+}
+
+function findPositionName(card: HTMLElement, link: HTMLAnchorElement | null, companyName: string): string {
+  const selectors = [
+    ".job-name",
+    ".job-title",
+    '[class*="job-name"]',
+    '[class*="job-title"]',
+    "[data-job-name]",
+    '[ka*="job-name"]',
+  ];
+  for (const selector of selectors) {
+    const candidates = [
+      ...(card.matches(selector) ? [card] : []),
+      ...card.querySelectorAll<HTMLElement>(selector),
+    ];
+    const value = candidates
+      .map((node) => normalize(node.innerText || node.textContent || ""))
+      .find((candidate) => isRealJobTitle(candidate) && !sameText(candidate, companyName));
+    if (value) return value;
+  }
+
+  if (link && selectors.some((selector) => link.matches(selector))) {
+    const linkText = normalize(link.innerText || link.textContent || "");
+    if (isRealJobTitle(linkText) && !sameText(linkText, companyName)) return linkText;
+  }
+  return "";
+}
+
+function sameText(left: string, right: string): boolean {
+  if (!left || !right) return false;
+  return normalize(left).toLocaleLowerCase() === normalize(right).toLocaleLowerCase();
 }
 
 function findCompanyName(card: HTMLElement): string {
@@ -105,7 +141,10 @@ export function isBossJobMarkedSent(card: HTMLElement): boolean {
 
 function isRealJobTitle(value: string): boolean {
   const title = normalize(value);
-  return title.length >= 2 && !/查看更多信息|查看详情|更多信息|职位详情/.test(title);
+  return title.length >= 2
+    && title.length <= 80
+    && !/未识别|未知岗位|未知职位|职位未识别|岗位未识别|查看更多信息|查看详情|更多信息|职位详情/.test(title)
+    && !/\d+(?:\.\d+)?\s*(?:[-~至–—－]\s*\d+(?:\.\d+)?\s*)?K/i.test(title);
 }
 
 function isMoreInfoEntry(card: HTMLElement, positionName: string): boolean {
@@ -167,7 +206,7 @@ export function pickText(root: Element, selectors: string[]): string {
 }
 
 export function extractId(url: string): string {
-  return url.match(/(?:job_detail|job)\/([^/?#]+)/)?.[1]?.replace(/\.html$/i, "") ?? "";
+  return extractJobIdFromUrl(url);
 }
 
 export function getJobId(card: HTMLElement, url: string): string {

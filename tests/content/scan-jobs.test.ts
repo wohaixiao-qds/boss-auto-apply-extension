@@ -129,4 +129,55 @@ describe("BOSS job scanning", () => {
 
     expect(scanJobs().jobs.map((item) => item.companyName)).toEqual(["列表公司一", "列表公司二"]);
   });
+
+  it("keeps a visible card with a job ID as provisional when its position is not recognized", () => {
+    document.body.innerHTML = `
+      <ul class="job-list">
+        <li class="job-card-wrapper">
+          <a href="https://www.zhipin.com/job_detail/mixed-1.html">星河科技 北京 20-30K</a>
+        </li>
+        <li class="job-card-wrapper">
+          <a href="https://www.zhipin.com/job_detail/valid-1.html"><span class="job-title">Java工程师</span></a>
+          <span class="company-name">云杉科技</span>
+        </li>
+      </ul>
+    `;
+
+    expect(scanJobs().jobs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ jobId: "mixed-1", positionName: "" }),
+      expect.objectContaining({ jobId: "valid-1", positionName: "Java工程师" }),
+    ]));
+  });
+
+  it("does not treat a company name as the position but keeps the card for API enrichment", () => {
+    document.body.innerHTML = `
+      <ul class="job-list">
+        <li class="job-card-wrapper">
+          <a href="https://www.zhipin.com/job_detail/company-as-title.html">
+            <span class="job-title">北京梧桐宇舟科技</span>
+          </a>
+          <span class="company-name">北京梧桐宇舟科技</span>
+        </li>
+      </ul>
+    `;
+
+    expect(scanJobs().jobs[0]).toMatchObject({
+      jobId: "company-as-title",
+      companyName: "北京梧桐宇舟科技",
+      positionName: "",
+    });
+  });
+
+  it("does not use an arbitrary company link as the job detail URL", () => {
+    document.body.innerHTML = `
+      <ul class="job-list">
+        <li class="job-card-wrapper" data-jobid="031609">
+          <a href="https://www.zhipin.com/gongsi/example.html">示例公司</a>
+          <span class="job-title">前端工程师</span>
+        </li>
+      </ul>
+    `;
+
+    expect(scanJobs().jobs[0]).toMatchObject({ jobId: "031609", url: "" });
+  });
 });

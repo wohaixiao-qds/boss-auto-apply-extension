@@ -31,4 +31,27 @@ describe("BOSS API job parser", () => {
   it("ignores more-information records", () => {
     expect(parseApiJobs({ id: "123", title: "查看更多信息", companyName: "公司", salary: "20K" })).toEqual([]);
   });
+
+  it("does not fabricate a detail URL from a numeric list-only ID", () => {
+    expect(parseApiJobs({
+      jobId: "7369595803",
+      jobName: "前端工程师",
+      brandName: "示例公司",
+      salaryDesc: "20-30K",
+    })).toEqual([]);
+  });
+
+  it("normalizes a relative canonical detail URL", () => {
+    const [parsed] = parseApiJobs({
+      jobUrl: "/job_detail/abc123def456.html",
+      jobName: "前端工程师",
+      brandName: "示例公司",
+      salaryDesc: "20-30K",
+    });
+
+    expect(parsed).toMatchObject({
+      jobId: "abc123def456",
+      url: "https://www.zhipin.com/job_detail/abc123def456.html",
+    });
+  });
 });

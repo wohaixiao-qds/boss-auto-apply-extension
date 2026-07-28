@@ -1,6 +1,8 @@
 import type { JobItem } from "../shared/types";
+import { extractJobIdFromUrl, normalizeBossJobUrl } from "../shared/job-target";
 
-const ID_KEYS = ["encryptJobId", "encrypt_job_id", "securityId", "security_id", "jobId", "job_id", "lid", "id"];
+const ENCRYPTED_ID_KEYS = ["encryptJobId", "encrypt_job_id"];
+const JOB_ID_KEYS = ["jobId", "job_id"];
 const TITLE_KEYS = ["jobName", "job_name", "jobTitle", "job_title", "positionName", "position_name", "title"];
 const COMPANY_KEYS = ["brandName", "brand_name", "companyName", "company_name", "company", "brand"];
 const SALARY_KEYS = ["salaryDesc", "salary_desc", "salaryName", "salary_name", "salary"];
@@ -40,12 +42,14 @@ function walk(value: unknown, visit: (value: Record<string, unknown>) => void): 
 }
 
 function toJobItem(record: Record<string, unknown>): JobItem | null {
-  const rawId = firstString(record, ID_KEYS);
   const positionName = firstString(record, TITLE_KEYS);
-  if (!rawId || !positionName || !isRealTitle(positionName)) return null;
+  if (!positionName || !isRealTitle(positionName)) return null;
 
-  const rawUrl = firstString(record, URL_KEYS);
-  const jobId = extractUrlId(rawUrl) || rawId;
+  const rawUrl = normalizeBossJobUrl(firstString(record, URL_KEYS));
+  const encryptedId = firstString(record, ENCRYPTED_ID_KEYS);
+  const fallbackId = firstString(record, JOB_ID_KEYS);
+  const jobId = extractJobIdFromUrl(rawUrl) || encryptedId || (isCanonicalLookingId(fallbackId) ? fallbackId : "");
+  if (!jobId) return null;
   const companyName = firstString(record, COMPANY_KEYS);
   const salary = firstString(record, SALARY_KEYS);
   const city = firstString(record, CITY_KEYS);
@@ -86,10 +90,10 @@ function firstString(record: Record<string, unknown>, keys: string[]): string {
   return "";
 }
 
-function extractUrlId(url: string): string {
-  return url.match(/(?:job_detail|job)\/([^/?#]+)/)?.[1]?.replace(/\.html$/i, "") || "";
-}
-
 function isRealTitle(value: string): boolean {
   return value.length >= 2 && !/查看更多信息|查看详情|更多信息|职位详情/.test(value);
+}
+
+function isCanonicalLookingId(value: string): boolean {
+  return value.length >= 12 && /[a-z]/i.test(value) && /\d/.test(value);
 }

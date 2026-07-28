@@ -44,7 +44,11 @@ button:disabled, [role="button"][aria-disabled="true"], [data-disabled] { cursor
 .job-card { background: #fff; transition: border-color .15s ease, box-shadow .15s ease; }
 .job-card:hover { border-color: var(--accent-7); box-shadow: 0 .2rem .6rem rgb(15 23 42 / 5%); }
 .job-copy { min-width: 0; flex: 1; }
+.job-field { min-width: 0; }
+.job-field + .job-field { margin-top: .2rem; }
+.job-field-label { width: 2rem; flex: 0 0 2rem; padding-top: .1rem; }
 .job-company, .job-position { overflow-wrap: anywhere; word-break: break-word; line-height: 1.35; }
+.job-company, .job-position { min-width: 0; }
 .job-actions { flex-shrink: 0; }
 .job-meta { margin-top: .35rem; }
 .job-meta > * { flex-shrink: 0; white-space: nowrap; }
