@@ -5,7 +5,7 @@ import { isJobListApiUrl, parseApiJobs } from "../src/content/api-parser";
 import { detectBlockingReason } from "../src/content/blocking-page";
 import { mergeVisibleJobs } from "../src/content/job-collection";
 import { filterJobs, type JobFilterOptions } from "../src/shared/job-filter";
-import type { JobItem, RuntimeMessage, SendResult } from "../src/shared/types";
+import { MAX_BATCH_LIMIT, type JobItem, type RuntimeMessage, type SendResult } from "../src/shared/types";
 
 const apiJobs = new Map<string, JobItem>();
 let apiSearchKey = "";
@@ -38,7 +38,7 @@ export default defineContentScript({
 });
 
 async function collectJobs(message: Extract<RuntimeMessage, { type: "SCAN_JOBS" }>) {
-  const limit = Math.max(1, Math.min(100, message.limit ?? 30));
+  const limit = Math.max(1, Math.min(MAX_BATCH_LIMIT, Math.floor(message.limit ?? 30)));
   const filterOptions: JobFilterOptions = {
     excludeOutsourcing: message.excludeOutsourcing ?? true,
     excludeHeadhunter: message.excludeHeadhunter ?? true,
@@ -130,13 +130,13 @@ async function sendGreeting(job: JobItem, context: "list" | "detail-tab"): Promi
 async function sendGreetingInDetailTab(job: JobItem): Promise<SendResult> {
   const currentJobId = extractId(location.href);
   if (currentJobId && currentJobId !== job.jobId) {
-    return { status: "paused", reason: `详情页职位 ID ${currentJobId} 与目标 ${job.jobId} 不一致。` };
+    return { status: "failed", reason: `详情页职位 ID ${currentJobId} 与目标 ${job.jobId} 不一致，已跳过该职位。` };
   }
   const blocked = detectBlockingPage();
   if (blocked) return { status: "paused", reason: blocked };
 
   const action = await waitForGreetingAction(job);
-  if (!action) return { status: "paused", reason: `详情页未找到与职位 ${job.jobId} 关联的“立即沟通”按钮。` };
+  if (!action) return { status: "failed", reason: `详情页未找到与职位 ${job.jobId} 关联的“立即沟通”按钮，已跳过该职位。` };
   if (isAlreadySent(action)) return { status: "skipped", reason: "BOSS 已标记该职位为已沟通。" };
 
   const feedbackTracker = createFeedbackTracker();
@@ -166,7 +166,7 @@ async function sendGreetingFromList(job: JobItem): Promise<SendResult> {
   const blocked = detectBlockingPage();
   if (blocked) return { status: "paused", reason: blocked };
   const listPath = location.pathname;
-  if (!isJobListPage()) return { status: "paused", reason: "当前页面不是 BOSS 职位列表，已暂停发送。" };
+  if (!isJobListPage()) return { status: "failed", reason: "当前页面不是 BOSS 职位列表，已跳过该职位。" };
 
   const card = findJobCards().find((candidate) => matchesJob(candidate, job));
   if (!card) return { status: "failed", reason: `当前列表找不到“${job.positionName}”对应的职位卡片。` };
@@ -175,7 +175,7 @@ async function sendGreetingFromList(job: JobItem): Promise<SendResult> {
   await activateJobCard(card, job);
 
   const action = findGreetingAction(card, job) || findGreetingAction(document.body, job);
-  if (!action) return { status: "paused", reason: `未找到与职位 ${job.jobId} 关联的“立即沟通”按钮，任务已暂停以避免误点其他职位。` };
+  if (!action) return { status: "failed", reason: `未找到与职位 ${job.jobId} 关联的“立即沟通”按钮，已跳过该职位。` };
   if (isAlreadySent(action)) return { status: "skipped", reason: "该职位可能已经打过招呼。" };
 
   const feedbackTracker = createFeedbackTracker();
@@ -183,7 +183,7 @@ async function sendGreetingFromList(job: JobItem): Promise<SendResult> {
   await delay(450);
   if (location.pathname !== listPath || !isJobListPage()) {
     feedbackTracker.observer.disconnect();
-    return { status: "paused", reason: "点击后离开了 BOSS 职位列表，任务已暂停。" };
+    return { status: "failed", reason: "点击后离开了 BOSS 职位列表，已跳过该职位。" };
   }
 
   // 某些版本会在预填充默认话术后再显示一次确认按钮。
@@ -193,7 +193,7 @@ async function sendGreetingFromList(job: JobItem): Promise<SendResult> {
     await delay(350);
     if (location.pathname !== listPath || !isJobListPage()) {
       feedbackTracker.observer.disconnect();
-      return { status: "paused", reason: "确认发送后离开了 BOSS 职位列表，任务已暂停。" };
+      return { status: "failed", reason: "确认发送后离开了 BOSS 职位列表，已跳过该职位。" };
     }
   }
 

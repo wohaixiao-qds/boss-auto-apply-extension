@@ -53,6 +53,23 @@ export interface SendResult {
   reason?: string;
 }
 
+export function getSendDisposition(result: SendResult): {
+  jobStatus: JobStatus;
+  pauseTask: boolean;
+  advanceQueue: boolean;
+} {
+  switch (result.status) {
+    case "sent":
+      return { jobStatus: "sent", pauseTask: false, advanceQueue: true };
+    case "skipped":
+      return { jobStatus: "skipped", pauseTask: false, advanceQueue: true };
+    case "failed":
+      return { jobStatus: "failed", pauseTask: false, advanceQueue: true };
+    case "paused":
+      return { jobStatus: "pending", pauseTask: true, advanceQueue: false };
+  }
+}
+
 export type RuntimeMessage =
   | { type: "SCAN_JOBS"; limit?: number; excludeOutsourcing?: boolean; excludeHeadhunter?: boolean }
   | { type: "START_TASK"; jobs: JobItem[] }
@@ -68,6 +85,8 @@ export interface ScanResponse {
   warning?: string;
   source?: "api" | "dom";
 }
+
+export const MAX_BATCH_LIMIT = 150;
 
 export const DEFAULT_SETTINGS: Settings = {
   minDelayMs: 3500,

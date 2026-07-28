@@ -33,7 +33,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { browser } from "wxt/browser";
 import { DAILY_STATS_KEY, getDailyStats, getSettings, getTaskState, saveSettings } from "../../src/shared/storage";
 import { toChineseError } from "../../src/shared/errors";
-import { createEmptyTask, DEFAULT_SETTINGS, getProgress, type DailyStats, type JobItem, type RuntimeMessage, type ScanResponse, type TaskState, type TaskStatus } from "../../src/shared/types";
+import { createEmptyTask, DEFAULT_SETTINGS, getProgress, MAX_BATCH_LIMIT, type DailyStats, type JobItem, type RuntimeMessage, type ScanResponse, type TaskState, type TaskStatus } from "../../src/shared/types";
 import type { Settings } from "../../src/shared/types";
 import { filterJobs } from "../../src/shared/job-filter";
 
@@ -131,6 +131,57 @@ function analyzeEmptyScan(warning: string | undefined, scriptReachable: boolean)
     return "无法连接 BOSS 页面，请确认已打开 BOSS 直聘职位列表并重试。";
   }
   return "未识别到职位。请确认当前是 BOSS 职位列表页、已完成城市/关键词/薪资等筛选，并等待列表加载完成后再扫描。";
+}
+
+function NumberSetting({
+  label,
+  value,
+  min = 1,
+  max,
+  onCommit,
+}: {
+  label: string;
+  value: number;
+  min?: number;
+  max?: number;
+  onCommit: (value: number) => void;
+}) {
+  const [draft, setDraft] = useState(String(value));
+
+  useEffect(() => {
+    setDraft(String(value));
+  }, [value]);
+
+  const commit = () => {
+    const parsed = Number.parseInt(draft, 10);
+    const normalized = Number.isFinite(parsed)
+      ? Math.max(min, max === undefined ? parsed : Math.min(max, parsed))
+      : value;
+    setDraft(String(normalized));
+    if (normalized !== value) onCommit(normalized);
+  };
+
+  return (
+    <Flex align="center" gap="2" className="compact-setting">
+      <Text size="1" color="gray">{label}</Text>
+      <TextField.Root
+        type="number"
+        min={String(min)}
+        max={max === undefined ? undefined : String(max)}
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") event.currentTarget.blur();
+          if (event.key === "Escape") {
+            setDraft(String(value));
+            event.currentTarget.blur();
+          }
+        }}
+        className="batch-input"
+      />
+    </Flex>
+  );
 }
 
 export default function App() {
@@ -361,34 +412,18 @@ export default function App() {
                 <Text size="1" color="gray">排除猎头</Text>
                 <Switch checked={settings.excludeHeadhunter} onCheckedChange={(checked) => void updateSettings({ ...settings, excludeHeadhunter: checked })} />
               </Flex>
-              <Flex align="center" gap="2" className="compact-setting">
-                <Text size="1" color="gray">投递上限</Text>
-                <TextField.Root
-                  type="number"
-                  min="1"
-                  max="100"
-                  value={String(settings.batchLimit)}
-                  onChange={(event) => {
-                    const value = Math.max(1, Math.min(100, Number(event.target.value) || 1));
-                    void updateSettings({ ...settings, batchLimit: value });
-                  }}
-                  className="batch-input"
-                />
-              </Flex>
-              <Flex align="center" gap="2" className="compact-setting">
-                <Text size="1" color="gray">每日上限</Text>
-                <TextField.Root
-                  type="number"
-                  min="1"
-                  max="200"
-                  value={String(settings.dailyLimit)}
-                  onChange={(event) => {
-                    const value = Math.max(1, Math.min(200, Number(event.target.value) || 1));
-                    void updateSettings({ ...settings, dailyLimit: value });
-                  }}
-                  className="batch-input"
-                />
-              </Flex>
+              <NumberSetting
+                label="投递上限"
+                value={settings.batchLimit}
+                max={MAX_BATCH_LIMIT}
+                onCommit={(value) => void updateSettings({ ...settings, batchLimit: value })}
+              />
+              <NumberSetting
+                label="每日上限"
+                value={settings.dailyLimit}
+                max={200}
+                onCommit={(value) => void updateSettings({ ...settings, dailyLimit: value })}
+              />
             </Flex>
           </Flex>
         </Card>

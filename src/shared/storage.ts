@@ -1,5 +1,5 @@
 import { browser } from "wxt/browser";
-import { createEmptyTask, DEFAULT_SETTINGS, type DailyStats, type Settings, type TaskState } from "./types";
+import { createEmptyTask, DEFAULT_SETTINGS, MAX_BATCH_LIMIT, type DailyStats, type Settings, type TaskState } from "./types";
 
 export const TASK_STATE_KEY = "boss-greeting-task";
 export const SETTINGS_KEY = "boss-greeting-settings";
@@ -31,7 +31,11 @@ export async function saveTaskState(task: TaskState): Promise<void> {
 
 export async function getSettings(): Promise<Settings> {
   const result = await browser.storage.local.get(SETTINGS_KEY);
-  return { ...DEFAULT_SETTINGS, ...(result[SETTINGS_KEY] as Partial<Settings> | undefined) };
+  const settings = { ...DEFAULT_SETTINGS, ...(result[SETTINGS_KEY] as Partial<Settings> | undefined) };
+  return {
+    ...settings,
+    batchLimit: Math.max(1, Math.min(MAX_BATCH_LIMIT, Math.floor(settings.batchLimit))),
+  };
 }
 
 export async function saveSettings(settings: Settings): Promise<void> {

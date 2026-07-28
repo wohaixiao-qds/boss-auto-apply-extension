@@ -4,6 +4,7 @@ import { getDailyStats, getSettings, getTaskState, incrementDailySent, saveTaskS
 import { toChineseError } from "../src/shared/errors";
 import {
   createEmptyTask,
+  getSendDisposition,
   randomDelay,
   type JobItem,
   type RuntimeMessage,
@@ -141,18 +142,12 @@ async function processTask() {
         await saveTaskState({ ...sendingTask, message: `正在发送打招呼：${job.companyName} · ${job.positionName}` });
         result = await sendJobInDetailTab(job);
       } catch (error) {
-        result = { status: "paused", reason: toChineseError(error, "无法打开职位详情页，任务已暂停，请检查 BOSS 登录状态。") };
+        result = { status: "failed", reason: toChineseError(error, "无法处理职位详情页，已记录失败并继续下一条。") };
       }
 
       const latest = await getTaskState();
-      const nextStatus = result.status === "paused" ? "paused" : "running";
-      const nextJobStatus = result.status === "sent"
-        ? "sent"
-        : result.status === "skipped"
-          ? "skipped"
-          : result.status === "paused"
-            ? "pending"
-            : "failed";
+      const disposition = getSendDisposition(result);
+      const nextStatus = disposition.pauseTask ? "paused" : "running";
       if (result.status === "sent") {
         // 仅在真正发送成功时累计今日投递企业数；跳过/失败不计入。
         await incrementDailySent();
@@ -160,8 +155,8 @@ async function processTask() {
       await saveTaskState({
         ...latest,
         status: nextStatus,
-        currentIndex: result.status === "paused" ? index : index + 1,
-        jobs: replaceJob(latest.jobs, jobId, { ...job, status: nextJobStatus, reason: result.reason }),
+        currentIndex: disposition.advanceQueue ? index + 1 : index,
+        jobs: replaceJob(latest.jobs, jobId, { ...job, status: disposition.jobStatus, reason: result.reason }),
         successCount: latest.successCount + (result.status === "sent" ? 1 : 0),
         skippedCount: latest.skippedCount + (result.status === "skipped" ? 1 : 0),
         failedCount: latest.failedCount + (result.status === "failed" ? 1 : 0),
@@ -171,7 +166,7 @@ async function processTask() {
             : `已完成：${job.companyName}，正在准备下一条。`)
           : result.status === "skipped" ? `已跳过：${job.companyName}。` : `处理失败：${job.companyName}。`),
       });
-      if (result.status === "paused") break;
+      if (disposition.pauseTask) break;
       await wait(randomDelay(settings));
     }
   } catch (error) {
@@ -250,7 +245,7 @@ async function sendWhenContentReady(tabId: number, job: JobItem): Promise<SendRe
       await wait(250);
     }
   }
-  throw new Error(`职位 ${job.jobId} 的详情页加载超时，任务已暂停。`);
+  return { status: "failed", reason: `职位 ${job.jobId} 的详情页加载超时，已记录失败并继续下一条。` };
 }
 
 async function updateStatus(status: TaskState["status"], message: string) {
