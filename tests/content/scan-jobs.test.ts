@@ -108,4 +108,25 @@ describe("BOSS job scanning", () => {
 
     expect(scanJobs().jobs[0].salary).toBe("13-24K·13薪");
   });
+
+  it("only scans the job-list region when the page also contains recommendations", () => {
+    document.body.innerHTML = `
+      <ul class="job-list">
+        <li class="job-card-wrapper">
+          <a href="https://www.zhipin.com/job_detail/list-1.html"><span class="job-title">前端工程师</span></a>
+          <span class="company-name">列表公司一</span>
+        </li>
+        <li class="job-card-wrapper">
+          <a href="https://www.zhipin.com/job_detail/list-2.html"><span class="job-title">后端工程师</span></a>
+          <span class="company-name">列表公司二</span>
+        </li>
+      </ul>
+      <aside class="recommend-panel">
+        <a href="https://www.zhipin.com/job_detail/recommend-1.html"><span class="job-title">推荐职位</span></a>
+        <span class="company-name">推荐公司</span>
+      </aside>
+    `;
+
+    expect(scanJobs().jobs.map((item) => item.companyName)).toEqual(["列表公司一", "列表公司二"]);
+  });
 });

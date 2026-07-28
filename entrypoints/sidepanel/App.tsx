@@ -33,9 +33,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { browser } from "wxt/browser";
 import { DAILY_STATS_KEY, getDailyStats, getSettings, getTaskState, saveSettings } from "../../src/shared/storage";
 import { toChineseError } from "../../src/shared/errors";
-import { createEmptyTask, getProgress, type DailyStats, type JobItem, type RuntimeMessage, type ScanResponse, type TaskState, type TaskStatus } from "../../src/shared/types";
+import { createEmptyTask, DEFAULT_SETTINGS, getProgress, type DailyStats, type JobItem, type RuntimeMessage, type ScanResponse, type TaskState, type TaskStatus } from "../../src/shared/types";
 import type { Settings } from "../../src/shared/types";
-import { isOutsourcingJob } from "../../src/shared/job-filter";
+import { filterJobs } from "../../src/shared/job-filter";
 
 const statusLabels: Record<TaskStatus | JobItem["status"], string> = {
   idle: "待扫描",
@@ -141,7 +141,7 @@ export default function App() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [completionDismissed, setCompletionDismissed] = useState(false);
   const [listFilter, setListFilter] = useState<ListFilter>("pending");
-  const [settings, setSettings] = useState<Settings>({ minDelayMs: 3500, maxDelayMs: 7500, batchLimit: 30, excludeOutsourcing: true, dailyLimit: 150 });
+  const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [daily, setDaily] = useState<DailyStats>({ date: "", sentCount: 0 });
   const [settingsSaved, setSettingsSaved] = useState(false);
 
@@ -185,9 +185,16 @@ export default function App() {
         throw new Error("请先打开 BOSS 直聘职位列表页（zhipin.com）。");
       }
 
+      const scanRequest = {
+        type: "SCAN_JOBS",
+        limit: settings.batchLimit,
+        excludeOutsourcing: settings.excludeOutsourcing,
+        excludeHeadhunter: settings.excludeHeadhunter,
+      } satisfies RuntimeMessage;
       let response: ScanResponse | undefined;
       try {
-        response = (await browser.tabs.sendMessage(tab.id, { type: "SCAN_JOBS" } satisfies RuntimeMessage)) as ScanResponse;
+        setNotice(`正在按投递上限收集职位，目标 ${settings.batchLimit} 个…`);
+        response = (await browser.tabs.sendMessage(tab.id, scanRequest)) as ScanResponse;
       } catch (error) {
         if (!isConnectionLost(error)) throw error;
         // 内容脚本未连接（常见于扩展刚重新加载后页面脚本被卸载）。
@@ -198,7 +205,7 @@ export default function App() {
         // 页面加载完成后，再留出时间让 BOSS 重新请求职位列表接口并被桥捕获。
         await delay(2500);
         try {
-          response = (await browser.tabs.sendMessage(tab.id, { type: "SCAN_JOBS" } satisfies RuntimeMessage)) as ScanResponse;
+          response = (await browser.tabs.sendMessage(tab.id, scanRequest)) as ScanResponse;
         } catch {
           throw new Error("无法连接 BOSS 页面，已尝试刷新重建连接仍未成功，请手动刷新页面后重试。");
         }
@@ -209,7 +216,7 @@ export default function App() {
         setNotice("正在等待 BOSS 职位列表加载…");
         await delay(2000);
         try {
-          response = (await browser.tabs.sendMessage(tab.id, { type: "SCAN_JOBS" } satisfies RuntimeMessage)) as ScanResponse;
+          response = (await browser.tabs.sendMessage(tab.id, scanRequest)) as ScanResponse;
         } catch {
           /* 保留上一次的空响应，交给下面统一分析报错 */
         }
@@ -220,16 +227,22 @@ export default function App() {
       }
 
       const scannedJobs = response.jobs;
-      const jobs = settings.excludeOutsourcing ? scannedJobs.filter((job) => !isOutsourcingJob(job)) : scannedJobs;
-      if (!jobs.length) throw new Error("筛选后没有符合条件的职位，请关闭“排除外包岗位”或调整 BOSS 筛选条件。");
-      const excludedCount = scannedJobs.length - jobs.length;
+      const filtered = filterJobs(scannedJobs, settings);
+      const jobs = filtered.jobs.slice(0, settings.batchLimit);
+      if (!jobs.length) throw new Error("筛选后没有符合条件的职位，请调整外包/猎头过滤设置或 BOSS 搜索条件。");
+      const exclusionParts = [
+        filtered.excluded.outsourcing ? `外包 ${filtered.excluded.outsourcing} 个` : "",
+        filtered.excluded.headhunter ? `猎头 ${filtered.excluded.headhunter} 个` : "",
+        filtered.excluded.contacted ? `已沟通 ${filtered.excluded.contacted} 个` : "",
+      ].filter(Boolean);
+      const shortage = jobs.length < settings.batchLimit ? `；当前列表未发现更多职位，少于目标 ${settings.batchLimit} 个` : "";
       await browser.storage.local.set({
         "boss-greeting-task": {
           ...createEmptyTask(),
           jobs: Object.fromEntries(jobs.map((job) => [job.jobId, job])),
           queue: jobs.map((job) => job.jobId),
           status: "awaiting_approval",
-          message: `已读取 ${jobs.length} 个职位${excludedCount ? `，已排除 ${excludedCount} 个外包岗位` : ""}，请审核后开始发送。`,
+          message: `已收集 ${scannedJobs.length} 个职位，筛选后保留 ${jobs.length} 个${exclusionParts.length ? `；已排除${exclusionParts.join("、")}` : ""}${shortage}，请审核后开始发送。`,
           updatedAt: Date.now(),
         },
       });
@@ -242,7 +255,7 @@ export default function App() {
       setBusy(false);
       setNotice("");
     }
-  }, [refresh, settings.excludeOutsourcing]);
+  }, [refresh, settings.batchLimit, settings.excludeHeadhunter, settings.excludeOutsourcing]);
 
   const removeJob = async (jobId: string) => {
     const { [jobId]: _removed, ...remainingJobs } = task.jobs;
@@ -345,6 +358,10 @@ export default function App() {
                 <Switch checked={settings.excludeOutsourcing} onCheckedChange={(checked) => void updateSettings({ ...settings, excludeOutsourcing: checked })} />
               </Flex>
               <Flex align="center" gap="2" className="compact-setting">
+                <Text size="1" color="gray">排除猎头</Text>
+                <Switch checked={settings.excludeHeadhunter} onCheckedChange={(checked) => void updateSettings({ ...settings, excludeHeadhunter: checked })} />
+              </Flex>
+              <Flex align="center" gap="2" className="compact-setting">
                 <Text size="1" color="gray">投递上限</Text>
                 <TextField.Root
                   type="number"
@@ -432,10 +449,10 @@ export default function App() {
         <Flex align="center" justify="between" gap="2" className="job-section-header">
           <Box>
             <Text as="div" weight="bold" size="3">待打招呼职位</Text>
-            <Text as="div" size="1" color="gray">扫描当前 BOSS 列表后先审核，再开始发送</Text>
+            <Text as="div" size="1" color="gray">按投递上限收集并筛选职位，审核后开始发送</Text>
           </Box>
-          <Tooltip content="扫描当前页面">
-            <IconButton variant="soft" onClick={() => void scanJobs()} disabled={busy} aria-label="扫描当前页面">
+          <Tooltip content="收集职位">
+            <IconButton variant="soft" onClick={() => void scanJobs()} disabled={busy} aria-label="按投递上限收集职位">
               {busy ? <RefreshCw className="spin" size={17} /> : <ScanSearch size={17} />}
             </IconButton>
           </Tooltip>
@@ -512,7 +529,7 @@ export default function App() {
             </Dialog.Root>
           ) : (
             <Button size="3" variant="soft" onClick={() => void scanJobs()} disabled={busy}>
-              <ScanSearch size={17} /> 扫描当前 BOSS 列表
+              <ScanSearch size={17} /> 按上限收集职位
             </Button>
           )}
           {orderedJobs.length > 0 && !isRunning && !isPaused ? (

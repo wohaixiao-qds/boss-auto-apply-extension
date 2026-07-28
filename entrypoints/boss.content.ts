@@ -1,10 +1,14 @@
 import { browser } from "wxt/browser";
 import { defineContentScript } from "wxt/sandbox";
-import { extractId, findJobCards, getJobId, isBossJobMarkedSent, normalize, scanJobs } from "../src/content/scanner";
-import { parseApiJobs } from "../src/content/api-parser";
+import { extractId, findJobCards, findJobListRoot, getJobId, isBossJobMarkedSent, normalize, scanJobs } from "../src/content/scanner";
+import { isJobListApiUrl, parseApiJobs } from "../src/content/api-parser";
+import { detectBlockingReason } from "../src/content/blocking-page";
+import { mergeVisibleJobs } from "../src/content/job-collection";
+import { filterJobs, type JobFilterOptions } from "../src/shared/job-filter";
 import type { JobItem, RuntimeMessage, SendResult } from "../src/shared/types";
 
-let latestApiJobs: JobItem[] = [];
+const apiJobs = new Map<string, JobItem>();
+let apiSearchKey = "";
 
 export default defineContentScript({
   matches: ["https://www.zhipin.com/*", "https://zhipin.com/*"],
@@ -12,14 +16,16 @@ export default defineContentScript({
   main() {
     window.addEventListener("message", (event) => {
       if (event.source !== window || event.data?.source !== "boss-auto-apply-api-bridge") return;
+      if (!isJobListApiUrl(String(event.data.url || ""))) return;
+      ensureApiSearchScope();
       const jobs = parseApiJobs(event.data.payload);
-      if (jobs.length > 0) latestApiJobs = jobs;
+      mergeJobs(apiJobs, jobs);
     });
 
     browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       const typedMessage = message as RuntimeMessage;
       if (typedMessage.type === "SCAN_JOBS") {
-        sendResponse(latestApiJobs.length > 0 ? { jobs: latestApiJobs, source: "api" } : { ...scanJobs(), source: "dom" });
+        void collectJobs(typedMessage).then(sendResponse);
         return true;
       }
       if (typedMessage.type === "SEND_JOB") {
@@ -30,6 +36,91 @@ export default defineContentScript({
     });
   },
 });
+
+async function collectJobs(message: Extract<RuntimeMessage, { type: "SCAN_JOBS" }>) {
+  const limit = Math.max(1, Math.min(100, message.limit ?? 30));
+  const filterOptions: JobFilterOptions = {
+    excludeOutsourcing: message.excludeOutsourcing ?? true,
+    excludeHeadhunter: message.excludeHeadhunter ?? true,
+  };
+  const collected = new Map<string, JobItem>();
+  let stagnantRounds = 0;
+
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    ensureApiSearchScope();
+    mergeVisibleJobs(collected, scanJobs().jobs, apiJobs);
+
+    if (filterJobs([...collected.values()], filterOptions).jobs.length >= limit) break;
+
+    const beforeSize = collected.size;
+    const advanced = advanceJobList();
+    await delay(advanced ? 900 : 700);
+
+    ensureApiSearchScope();
+    mergeVisibleJobs(collected, scanJobs().jobs, apiJobs);
+
+    stagnantRounds = collected.size > beforeSize ? 0 : stagnantRounds + 1;
+    if (stagnantRounds >= 4) break;
+  }
+
+  const jobs = [...collected.values()];
+  return {
+    jobs,
+    source: "dom" as const,
+    warning: jobs.length ? undefined : "未读取到带职位 ID 的职位卡片，请确认当前页面是 BOSS 职位列表。",
+  };
+}
+
+function ensureApiSearchScope(): void {
+  const nextKey = `${location.pathname}${location.search}`;
+  if (nextKey === apiSearchKey) return;
+  apiSearchKey = nextKey;
+  apiJobs.clear();
+}
+
+function mergeJobs(target: Map<string, JobItem>, jobs: Iterable<JobItem>): void {
+  for (const job of jobs) {
+    if (!job.jobId) continue;
+    target.set(job.jobId, job);
+  }
+}
+
+function advanceJobList(): boolean {
+  const cards = findJobCards();
+  const lastCard = cards.at(-1);
+  if (!lastCard) return false;
+
+  const scrollTarget = findJobScrollTarget(lastCard);
+  if (scrollTarget) {
+    const before = scrollTarget.scrollTop;
+    const maxScrollTop = Math.max(0, scrollTarget.scrollHeight - scrollTarget.clientHeight);
+    const next = Math.min(maxScrollTop, before + Math.max(360, scrollTarget.clientHeight * 0.8));
+    lastCard.scrollIntoView?.({ block: "end", behavior: "smooth" });
+    scrollTarget.scrollTo({ top: next, behavior: "smooth" });
+    scrollTarget.dispatchEvent(new Event("scroll", { bubbles: true }));
+    return next > before + 1;
+  }
+
+  const before = window.scrollY;
+  lastCard.scrollIntoView?.({ block: "end", behavior: "smooth" });
+  window.scrollBy({ top: Math.max(360, window.innerHeight * 0.8), behavior: "smooth" });
+  return window.scrollY > before + 1;
+}
+
+function findJobScrollTarget(from?: HTMLElement): HTMLElement | null {
+  const start = from ?? findJobCards().at(-1);
+  let current = start?.parentElement ?? null;
+  while (current && current !== document.body) {
+    const style = getComputedStyle(current);
+    if (/(auto|scroll)/.test(style.overflowY) && current.scrollHeight > current.clientHeight + 8) return current;
+    current = current.parentElement;
+  }
+
+  const listRoot = findJobListRoot();
+  if (listRoot && listRoot.scrollHeight > listRoot.clientHeight + 8) return listRoot;
+  const candidates = document.querySelectorAll<HTMLElement>(".job-list-box, .job-list, [class*='job-list']");
+  return [...candidates].find((element) => element.scrollHeight > element.clientHeight + 8) ?? null;
+}
 
 async function sendGreeting(job: JobItem, context: "list" | "detail-tab"): Promise<SendResult> {
   if (context === "detail-tab") return sendGreetingInDetailTab(job);
@@ -271,18 +362,7 @@ function matchesJob(card: HTMLElement, job: JobItem): boolean {
 }
 
 function detectBlockingPage(): string | undefined {
-  const text = normalize(document.body.innerText);
-  if (/验证码|安全验证|滑动验证|行为异常/.test(text)) return "检测到验证码或安全验证，任务已暂停。";
-  if (/登录|请先登录/.test(text) && !/职位|公司/.test(text)) return "BOSS 登录状态已失效，任务已暂停。";
-  if (/操作频繁|访问过于频繁|稍后再试/.test(text)) return "检测到平台频率限制，任务已暂停。";
-  // BOSS 接近/达到每日沟通上限时弹出的真实提示文案（实测）：
-  //   "您已达到沟通上限"
-  //   "您今天已与150位BOSS沟通，休息一下，明天再来吧～"
-  // 抓到任一即立即暂停，避免继续点击触发风控。
-  if (/达到沟通上限|您今天已与.*?BOSS沟通|沟通次数已达上限|打招呼次数已达上限|今日打招呼次数还剩|明天再来吧|明日再来/.test(text)) {
-    return "BOSS 提示今日沟通已达上限，任务已暂停，请明天再继续。";
-  }
-  return undefined;
+  return detectBlockingReason(document.body.innerText);
 }
 
 interface FeedbackTracker {

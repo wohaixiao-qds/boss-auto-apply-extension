@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { parseApiJobs } from "../../src/content/api-parser";
+import { isJobListApiUrl, parseApiJobs } from "../../src/content/api-parser";
 
 describe("BOSS API job parser", () => {
+  it("only accepts job-list API responses for page collection", () => {
+    expect(isJobListApiUrl("https://www.zhipin.com/wapi/zpgeek/search/joblist.json?city=101010100")).toBe(true);
+    expect(isJobListApiUrl("https://www.zhipin.com/wapi/zpgeek/job/detail.json")).toBe(false);
+  });
+
   it("extracts company, salary, city, and canonical detail URL id", () => {
     const jobs = parseApiJobs({
       zpData: {

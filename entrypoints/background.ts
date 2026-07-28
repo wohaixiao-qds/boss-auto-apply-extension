@@ -146,7 +146,13 @@ async function processTask() {
 
       const latest = await getTaskState();
       const nextStatus = result.status === "paused" ? "paused" : "running";
-      const nextJobStatus = result.status === "sent" ? "sent" : result.status === "skipped" ? "skipped" : "failed";
+      const nextJobStatus = result.status === "sent"
+        ? "sent"
+        : result.status === "skipped"
+          ? "skipped"
+          : result.status === "paused"
+            ? "pending"
+            : "failed";
       if (result.status === "sent") {
         // 仅在真正发送成功时累计今日投递企业数；跳过/失败不计入。
         await incrementDailySent();

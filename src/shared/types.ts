@@ -38,6 +38,7 @@ export interface Settings {
   maxDelayMs: number;
   batchLimit: number;
   excludeOutsourcing: boolean;
+  excludeHeadhunter: boolean;
   dailyLimit: number;
 }
 
@@ -53,7 +54,7 @@ export interface SendResult {
 }
 
 export type RuntimeMessage =
-  | { type: "SCAN_JOBS" }
+  | { type: "SCAN_JOBS"; limit?: number; excludeOutsourcing?: boolean; excludeHeadhunter?: boolean }
   | { type: "START_TASK"; jobs: JobItem[] }
   | { type: "PAUSE_TASK" }
   | { type: "RESUME_TASK" }
@@ -73,6 +74,7 @@ export const DEFAULT_SETTINGS: Settings = {
   maxDelayMs: 7500,
   batchLimit: 30,
   excludeOutsourcing: true,
+  excludeHeadhunter: true,
   dailyLimit: 150,
 };
 

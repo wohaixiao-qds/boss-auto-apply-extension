@@ -115,13 +115,13 @@ function isMoreInfoEntry(card: HTMLElement, positionName: string): boolean {
 }
 
 export function findJobCards(): HTMLElement[] {
+  const root = findJobListRoot() ?? document;
   const selectors = [
     ".job-card-wrap",
     ".job-card-box",
     ".job-primary",
     "li.job-card-wrapper",
     ".job-card",
-    ".job-list li",
     "li[ka='job-card']",
     '[data-jobid]',
     '[class*="job-card"]',
@@ -130,7 +130,7 @@ export function findJobCards(): HTMLElement[] {
   ];
   const found = new Set<HTMLElement>();
   for (const selector of selectors) {
-    document.querySelectorAll<HTMLElement>(selector).forEach((element) => {
+    root.querySelectorAll<HTMLElement>(selector).forEach((element) => {
       const card = element.matches('a[href*="/job_detail/"], a[href*="/job/"]')
         ? (element.closest(".job-card-wrap, .job-card-box, .job-card-wrapper, .job-primary, li, article, .job-card") as HTMLElement | null) ?? element
         : element;
@@ -138,6 +138,24 @@ export function findJobCards(): HTMLElement[] {
     });
   }
   return [...found].filter((element) => normalize(element.textContent ?? "").length > 5);
+}
+
+export function findJobListRoot(): HTMLElement | null {
+  const selectors = [
+    ".job-list",
+    ".job-list-box",
+    "[ka='job-list']",
+    "[class*='job-list-container']",
+    "[class*='job-list']",
+  ];
+  for (const selector of selectors) {
+    const candidates = [...document.querySelectorAll<HTMLElement>(selector)];
+    const root = candidates.find((candidate) => (
+      candidate.querySelectorAll('a[href*="/job_detail/"], a[href*="/job/"]').length >= 2
+    ));
+    if (root) return root;
+  }
+  return null;
 }
 
 export function pickText(root: Element, selectors: string[]): string {

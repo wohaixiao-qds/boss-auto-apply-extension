@@ -30,7 +30,7 @@ button:disabled, [role="button"][aria-disabled="true"], [data-disabled] { cursor
 .settings-card { flex-shrink: 0; padding: .55rem .75rem; background: #fff; }
 .settings-inline { min-width: 0; }
 .settings-title, .settings-controls, .compact-setting { flex-shrink: 0; }
-.settings-controls { margin-left: auto; }
+.settings-controls { justify-content: flex-end; flex-wrap: wrap; margin-left: auto; row-gap: .45rem; }
 .batch-input { width: 3.5rem; }
 .progress { margin-top: .8rem; }
 .job-section-header { flex-shrink: 0; }
@@ -78,7 +78,7 @@ button:disabled, [role="button"][aria-disabled="true"], [data-disabled] { cursor
 
 @media (max-width: 25rem) {
   .settings-inline { align-items: flex-start; flex-wrap: wrap; }
-  .settings-controls { width: 100%; justify-content: space-between; margin-left: 0; }
+  .settings-controls { width: 100%; justify-content: flex-start; margin-left: 0; }
 }
 
 @media (max-height: 42rem) {

@@ -19,6 +19,15 @@ export function parseApiJobs(payload: unknown): JobItem[] {
   return jobs;
 }
 
+export function isJobListApiUrl(value: string): boolean {
+  try {
+    const url = new URL(value, "https://www.zhipin.com");
+    return /(?:search\/joblist|recommend\/job\/list|joblist(?:\.json)?)/i.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
 function walk(value: unknown, visit: (value: Record<string, unknown>) => void): void {
   if (!value || typeof value !== "object") return;
   if (Array.isArray(value)) {

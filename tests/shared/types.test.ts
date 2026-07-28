@@ -27,6 +27,6 @@ describe("task helpers", () => {
   });
 
   it("calculates a deterministic random delay", () => {
-    expect(randomDelay({ minDelayMs: 1000, maxDelayMs: 3000, batchLimit: 10, excludeOutsourcing: true, dailyLimit: 50 }, 0.5)).toBe(2000);
+    expect(randomDelay({ minDelayMs: 1000, maxDelayMs: 3000, batchLimit: 10, excludeOutsourcing: true, excludeHeadhunter: true, dailyLimit: 50 }, 0.5)).toBe(2000);
   });
 });
